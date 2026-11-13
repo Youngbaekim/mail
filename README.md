@@ -25,7 +25,7 @@ npm run dev      # 개발 서버 → http://localhost:5173/mail/
 | Google Cloud | 프로젝트 `YB-Mail` (ID yb-mail-514606, youngpeace 계정 소유, 외부·테스트 상태), 테스트 사용자 = 두 계정, 웹 클라이언트 "YB-Mail Web" |
 | 클라이언트 ID | `src/config.js`의 `CLIENT_ID` (비워 두면 첫 화면에서 입력, 기기별 저장) |
 
-## 기능 (v0.4.0)
+## 기능 (v0.5.0)
 
 | 구분 | 내용 |
 |---|---|
@@ -41,6 +41,10 @@ npm run dev      # 개발 서버 → http://localhost:5173/mail/
 | 설치 | 프로그램으로 설치되지 않은 브라우저(Chrome·Edge)에서는 상단에 [설치하기] 단추 → 누르면 설치 창 (바탕화면·작업표시줄·시작 메뉴, 새 메일 바로가기) |
 | 알림 | 받은편지함 새 메일만, 1분마다 확인, Windows 알림(오른쪽 아래)에 보낸 사람·계정·제목·본문 앞부분, 누르면 그 메일 열기. 앱(창)이 열려 있는 동안만 동작, ⚙에서 켜고 끔 |
 | 단축키 | C 새 메일 · R 답장 · A 전체 답장 · F 전달 · E 보관 · Del 삭제 · U 읽음/안읽음 · S 별표 · J/K 이동 · / 검색 · Esc 선택 해제 · Ctrl+Enter 보내기 |
+
+## 데스크톱 프로그램 (v0.5.0~)
+
+Windows 설치판은 `C:\dev\yb-mail-desktop` (Electron). 같은 웹 화면을 쓰되 `window.ybDesktop`이 있으면 로그인 유지(갱신 토큰)·트레이 상주·첨부 바로 실행을 사용.
 
 ## 알려진 제약
 

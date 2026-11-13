@@ -19,8 +19,13 @@ export class AuthError extends Error {
   constructor(email, msg = '다시 연결이 필요합니다') { super(msg); this.email = email; this.name = 'AuthError'; }
 }
 
+/* ───────── 데스크톱 프로그램(YB-Mail.exe) ───────── */
+// 프로그램 안에서는 window.ybDesktop 이 있음 → 로그인은 기본 브라우저에서, 연결 유지는 갱신 토큰(1시간 재연결 없음)
+const D = typeof window !== 'undefined' ? window.ybDesktop : null;
+export const isDesktop = !!D;
+
 /* ───────── 클라이언트 ID ───────── */
-export const clientId = () => CLIENT_ID || ls.get(K_CID, '') || '';
+export const clientId = () => (D ? 'desktop' : CLIENT_ID || ls.get(K_CID, '') || '');
 export const setClientId = (v) => ls.set(K_CID, String(v || '').trim());
 
 /* ───────── 계정 목록 ───────── */
@@ -58,7 +63,7 @@ const saveToken = (email, r) => ls.set(K_TOK + email, { t: r.access_token, scope
 /* ───────── Google 스크립트 ───────── */
 let gisP = null;
 export function loadGis() {
-  if (window.google?.accounts?.oauth2) return Promise.resolve();
+  if (D || window.google?.accounts?.oauth2) return Promise.resolve();
   if (gisP) return gisP;
   gisP = new Promise((res, rej) => {
     const s = document.createElement('script');
@@ -109,8 +114,19 @@ async function whoAmI(accessToken) {
   return r.json(); // { emailAddress, messagesTotal, threadsTotal, historyId }
 }
 
+function addToList(email) {
+  const list = accounts();
+  if (!list.some((a) => a.email === email)) {
+    const used = new Set(list.map((a) => a.color));
+    const color = ACCOUNT_COLORS.find((c) => !used.has(c)) || ACCOUNT_COLORS[list.length % ACCOUNT_COLORS.length];
+    list.push({ email, color, label: email.split('@')[1] === 'gmail.com' ? '개인' : email.split('@')[1].split('.')[0].toUpperCase(), name: '', signature: '' });
+    saveAccounts(list);
+  } else listeners.forEach((f) => f());
+}
+
 /** 새 계정 추가 (계정 선택 창) */
 export async function addAccount() {
+  if (D) { const r = await D.signIn(); saveToken(r.email, r); addToList(r.email); return r.email; }
   const r = await requestToken({ prompt: 'select_account consent' });
   const p = await whoAmI(r.access_token);
   const email = p.emailAddress.toLowerCase();
@@ -130,6 +146,14 @@ const pending = new Map();
 export function reconnect(email, { force = false } = {}) {
   if (pending.has(email)) return pending.get(email);
   const p = (async () => {
+    if (D) {
+      // 저장된 갱신 토큰으로 먼저 (창 없음), 안 되면 브라우저 로그인
+      let r = force ? null : await D.token(email);
+      if (!r || r.error) r = await D.signIn(email);
+      saveToken(email, r);
+      listeners.forEach((f) => f());
+      return email;
+    }
     const r = await requestToken({ prompt: force ? 'consent' : '', login_hint: email });
     const who = await whoAmI(r.access_token);
     if (who.emailAddress.toLowerCase() !== email) {
@@ -144,7 +168,31 @@ export function reconnect(email, { force = false } = {}) {
 }
 export const isReconnecting = (email) => pending.has(email);
 
+/** 데스크톱: 프로그램에 연결 정보가 남아 있는데 목록에 없는 계정 되살리기 */
+export async function desktopRestore() {
+  if (!D) return;
+  try { for (const email of await D.accounts()) addToList(email); } catch { /* 무시 */ }
+}
+/** 데스크톱: 창 없이 토큰 새로 받기 (갱신 토큰). 성공하면 true */
+export async function silentRefresh(email) {
+  if (!D) return false;
+  try {
+    const r = await D.token(email);
+    if (!r || r.error) return false;
+    saveToken(email, r);
+    return true;
+  } catch { return false; }
+}
+/** 데스크톱: 만료가 가까운 계정 모두 조용히 갱신 */
+export async function refreshAllSilently(minLeftMs = 10 * 60_000) {
+  if (!D) return;
+  let changed = false;
+  for (const a of accounts()) if (tokenLeft(a.email) < minLeftMs && (await silentRefresh(a.email))) changed = true;
+  if (changed) listeners.forEach((f) => f());
+}
+
 export function removeAccount(email) {
+  if (D) D.signOut(email).catch(() => {});
   const t = token(email);
   if (t && window.google?.accounts?.oauth2) { try { google.accounts.oauth2.revoke(t, () => {}); } catch { /* 무시 */ } }
   ls.del(K_TOK + email);

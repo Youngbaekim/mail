@@ -16,6 +16,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = escHtml;
 const PFX = DEMO ? 'ybm-demo-' : 'ybm-';
+const DESK = window.ybDesktop || null; // YB-Mail.exe(데스크톱 프로그램) 안에서 실행 중
 const pref = {
   get: (k, d) => { try { const v = localStorage.getItem(PFX + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
   set: (k, v) => { try { localStorage.setItem(PFX + k, JSON.stringify(v)); } catch { /* 무시 */ } },
@@ -191,6 +192,7 @@ function renderSide() {
   $('#folders').innerHTML = h;
   document.title = total ? `(${total}) YB-Mail` : 'YB-Mail';
   try { if (total) navigator.setAppBadge?.(total); else navigator.clearAppBadge?.(); } catch { /* 무시 */ }
+  DESK?.setBadge(total).catch(() => {});
 }
 
 async function selectFolder(scope, label) {
@@ -704,8 +706,17 @@ function saveToDownloads(blob, name) {
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
-/** 바로 열기: 다운로드 폴더에 저장 + (PDF·그림은) 새 탭에서 열기 */
+const attBytes = async (m, x) => new Uint8Array(await (await attBlob(m, x)).arrayBuffer());
+/** 바로 열기: 다운로드 폴더에 저장 + (PDF·그림은) 새 탭에서 열기 — 프로그램에서는 저장 후 연결된 프로그램으로 바로 실행 */
 async function attOpen(m, x) {
+  if (DESK) {
+    try {
+      toast(`'${x.filename}' 받는 중…`, 0);
+      const r = await DESK.saveOpen(x.filename, await attBytes(m, x));
+      toast(r.error ? `다운로드 폴더에 저장했지만 열지 못했습니다: ${r.error}` : `다운로드 폴더에 저장하고 열었습니다.`, 5000, { label: '폴더 보기', run: () => DESK.showFile(r.path) });
+    } catch (e) { fail(e, 'att'); }
+    return;
+  }
   const win = viewable(x) ? window.open('', '_blank') : null;
   try {
     toast(`'${x.filename}' 받는 중…`, 0);
@@ -717,6 +728,14 @@ async function attOpen(m, x) {
 }
 /** 다운로드: 저장할 위치·이름 고르기 */
 async function attSaveAs(m, x) {
+  if (DESK) {
+    try {
+      const bytes = await attBytes(m, x);
+      const p = await DESK.saveAs(x.filename, bytes);
+      if (p) toast(`저장했습니다: ${p}`, 5000, { label: '폴더 보기', run: () => DESK.showFile(p) });
+    } catch (e) { fail(e, 'saveAs'); }
+    return;
+  }
   if (!window.showSaveFilePicker) { toast('이 브라우저는 저장 위치 선택을 지원하지 않아 다운로드 폴더에 저장합니다.'); attBlob(m, x).then((b) => saveToDownloads(b, x.filename)).catch((e) => fail(e, 'att')); return; }
   let handle;
   try { handle = await window.showSaveFilePicker({ suggestedName: x.filename, id: 'ybm-att', startIn: 'downloads' }); }
@@ -732,6 +751,15 @@ async function attSaveAs(m, x) {
 /** 모두 받기: 폴더 고르기 → 첨부 전부 저장 */
 async function attSaveAll(m) {
   const files = m.attachments.filter((x) => !x.inline || !(m.html || '').includes(`cid:${x.contentId}`));
+  if (DESK) {
+    const dir = await DESK.pickDir(); if (!dir) return;
+    try {
+      let i = 0, last = '';
+      for (const x of files) { toast(`저장 중… ${++i}/${files.length}`, 0); last = await DESK.write(dir, x.filename, await attBytes(m, x)); }
+      toast(`${files.length}개 파일을 저장했습니다.`, 5000, { label: '폴더 보기', run: () => DESK.showFile(last) });
+    } catch (e) { fail(e, 'saveAll'); }
+    return;
+  }
   if (!window.showDirectoryPicker) {
     for (const x of files) { const b = await attBlob(m, x); saveToDownloads(b, x.filename); }
     toast(`${files.length}개 파일을 다운로드 폴더에 저장했습니다.`);
@@ -1227,13 +1255,13 @@ function gate(kind) {
       <p class="gate-msg" id="gate-msg"></p>`;
   } else if (kind === 'add') {
     card.innerHTML = `${icon}<h2>YB-Mail</h2>
-      <p>학교 계정과 개인 계정을 차례로 추가하면<br>두 계정 메일을 한 화면에서 봅니다.</p>
+      <p>학교 계정과 개인 계정을 차례로 추가하면<br>두 계정 메일을 한 화면에서 봅니다.${DESK ? '<br><small>누르면 기본 브라우저에서 Google 로그인 창이 열립니다.</small>' : ''}</p>
       <button class="btn-primary" id="gate-add">Google 계정 추가</button>
       <p class="gate-msg" id="gate-msg"></p>
       <button class="btn-text" id="gate-cid-reset">클라이언트 ID 다시 입력</button>`;
   } else if (kind === 'connect') {
     card.innerHTML = `${icon}<h2>계정 연결</h2>
-      <p>보안을 위해 연결은 1시간마다 새로 받습니다.<br>계정마다 <b>연결</b>을 눌러 주세요(창이 잠깐 떴다 닫힙니다).</p>
+      <p>${DESK ? '계정마다 <b>연결</b>을 누르면 기본 브라우저에서 Google 로그인 창이 열립니다.<br>로그인 후 YB-Mail로 돌아오면 됩니다(이후 자동 유지).' : '보안을 위해 연결은 1시간마다 새로 받습니다.<br>계정마다 <b>연결</b>을 눌러 주세요(창이 잠깐 떴다 닫힙니다).'}</p>
       <div class="gate-accs">${accs().map((a) => `<div class="gate-acc" style="--acc:${a.color}"><span>${esc(a.email)}</span>${auth.token(a.email) ? '<b class="ok">✓ 연결됨</b>' : `<button class="btn-primary" data-reconnect="${esc(a.email)}">연결</button>`}</div>`).join('')}</div>
       <p class="gate-msg" id="gate-msg"></p>
       <button class="btn-text" id="gate-skip">저장된 메일만 보기 (연결 없이 열기)</button>`;
@@ -1276,7 +1304,7 @@ const inAppBrowser = () => /Electron|Claude/i.test(navigator.userAgent); // Clau
 let installedApp = false;
 installEvt = window.__bip || null;
 /** 프로그램 창으로 열려 있지 않으면 [설치하기] 단추 표시 (브라우저가 설치 안내를 안 줘도 방법 안내) */
-function syncInstall() { const off = isStandalone() || installedApp || !!CPWIN; for (const id of ['#btn-install', '#btn-install2']) { const b = $(id); if (b) b.hidden = off; } }
+function syncInstall() { const off = isStandalone() || installedApp || !!CPWIN || !!DESK; for (const id of ['#btn-install', '#btn-install2']) { const b = $(id); if (b) b.hidden = off; } }
 window.addEventListener('ybm-bip', () => { installEvt = window.__bip; syncInstall(); });
 window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvt = e; syncInstall(); });
 window.addEventListener('appinstalled', () => { installEvt = null; installedApp = true; syncInstall(); toast('YB-Mail을 프로그램으로 설치했습니다. 바탕화면·시작 메뉴에서 여세요.', 7000); });
@@ -1296,7 +1324,7 @@ async function doInstall() {
     return;
   }
   await askChoice('설치하기', `<p class="modal-tip">브라우저가 아직 설치 준비를 알려 주지 않았습니다. 아래 방법으로 바로 설치할 수 있습니다.</p>
-    <ol class="inst-steps"><li><b>Chrome</b>: 주소창 오른쪽 끝의 <b>설치 아이콘(⊕ 모니터 모양)</b> 누르기<br>또는 메뉴 <b>⋮ → 전송, 저장, 공유 → 페이지를 앱으로 설치</b></li>
+    <ol class="inst-steps"><li><b>Chrome</b>: 주소창 오른쪽 끝의 <b>설치 아이콘(⊕ 모니터 모양)</b> 누르기<br>또는 메뉴 <b>⋮ → 캐스팅, 저장, 공유 → 페이지를 앱으로 설치</b><br>그 항목이 없으면 <b>⋮ → 캐스팅, 저장, 공유 → 바로가기 만들기… → '창으로 열기' 체크 → 만들기</b> (같은 프로그램 창으로 설치됨)</li>
     <li><b>Edge</b>: 메뉴 <b>… → 앱 → 이 사이트를 앱으로 설치</b></li>
     <li>이미 설치했다면: 바탕화면·시작 메뉴의 <b>YB-Mail</b> 아이콘으로 여세요.</li></ol>`, [['ok', '확인', 'btn-primary']]);
 }
@@ -1354,6 +1382,7 @@ function showMailNotif(a, t) {
     silent: false,
   });
   n.onclick = async () => {
+    DESK?.show().catch(() => {});
     window.focus();
     n.close();
     if (!state.items.some((x) => x.key === t.key)) { state.items.unshift(t); renderList(); }
@@ -1361,8 +1390,10 @@ function showMailNotif(a, t) {
   };
 }
 
+let deskInfo = {};
 async function openMenu(anchor) {
   const usage = await cache.usage();
+  if (DESK) deskInfo = await DESK.info().catch(() => ({}));
   showPop(anchor, `
     <div class="pop-row">화면 <select id="m-theme" class="sel"><option value="system">기기 설정 따름</option><option value="light">밝게</option><option value="dark">어둡게</option></select></div>
     ${mi('img', `${state.showImages ? '☑' : '☐'} 메일 속 외부 그림 바로 표시`)}
@@ -1379,8 +1410,8 @@ async function openMenu(anchor) {
     ${mi('wipe', '이 기기 저장본 모두 지우기', { icon: '🧹', cls: 'danger' })}
     <hr>
     ${!isStandalone() ? mi('install', installEvt ? '앱으로 설치 (바탕화면·작업표시줄)' : '앱으로 설치하는 방법', { icon: '⬇' }) : ''}
-    ${mi('cid', '클라이언트 ID 바꾸기', { icon: '🔑' })}
-    ${mi('update', `새 버전 확인 (v${VERSION})`, { icon: '⟳' })}`, async (k) => {
+    ${DESK ? mi('autostart', `${deskInfo.autoStart ? '☑' : '☐'} Windows 시작할 때 자동 실행`, { icon: '🖥' }) : mi('cid', '클라이언트 ID 바꾸기', { icon: '🔑' })}
+    ${mi('update', `새 버전 확인 (v${VERSION}${DESK && deskInfo.version ? ` · 프로그램 ${deskInfo.version}` : ''})`, { icon: '⟳' })}`, async (k) => {
     if (k === 'notif') {
       if (notif.on && Notification.permission === 'granted') { notif.on = false; pref.set('notifOn', false); toast('새 메일 알림을 껐습니다.'); }
       else { notif.on = true; pref.set('notifOn', true); pref.set('notifLater', false); enableNotif(); }
@@ -1393,6 +1424,7 @@ async function openMenu(anchor) {
     if (k === 'prefetch') { bg.ranOnce = false; runPrefetch(); }
     if (k === 'wipe' && confirm('이 기기에 저장한 메일 사본을 모두 지울까요?\n(Gmail 서버의 메일은 그대로이며, 다시 미리 받습니다)')) { await cache.clearAll(); toast('기기 저장본을 지웠습니다.'); }
     if (k === 'install') doInstall();
+    if (k === 'autostart') { await DESK.setAutoStart(!deskInfo.autoStart); toast(!deskInfo.autoStart ? 'Windows를 시작할 때 YB-Mail이 트레이에서 자동 실행됩니다.' : '자동 실행을 껐습니다.'); }
     if (k === 'cid') { const v = prompt('OAuth 클라이언트 ID', auth.clientId()); if (v != null) { auth.setClientId(v); toast('저장했습니다. 계정을 다시 연결하세요.'); } }
     if (k === 'update') navigator.serviceWorker?.getRegistration().then((r) => r?.update()).then(() => toast('확인했습니다. 새 버전이 있으면 안내가 뜹니다.'));
   });
@@ -1892,7 +1924,7 @@ function bind() {
   // 만료 직전이면, 다음 클릭 때 조용히 새 토큰 받기 (팝업은 클릭 안에서만 허용)
   const tried = new Map();
   document.addEventListener('pointerdown', () => {
-    if (DEMO) return;
+    if (DEMO || DESK) return;
     for (const a of accs()) {
       const left = auth.tokenLeft(a.email);
       if (left > 0 && left < 8 * 60_000 && !auth.isReconnecting(a.email) && Date.now() - (tried.get(a.email) || 0) > 5 * 60_000) {
@@ -1915,6 +1947,8 @@ function bind() {
   }, 90_000);
   setInterval(() => { if (!CPWIN && connected().length) { bg.ranOnce = false; runPrefetch(); } }, 15 * 60_000);
   setInterval(() => { if (started && connected().length) checkNewMail(); }, 60_000);
+  if (DESK) setInterval(() => auth.refreshAllSilently().then(() => { renderBanner(); renderSide(); }), 4 * 60_000);
+  window.__ybmCompose = () => openCompose({ mode: 'new' });
 }
 
 /* ───────── 서비스 워커 (설치·새 버전 안내) ───────── */
@@ -1963,6 +1997,11 @@ async function boot() {
     window.__ybCheck = checkNewMail;
     afterConnect();
     return;
+  }
+  if (DESK) {
+    document.body.classList.add('desktop');
+    await auth.desktopRestore();
+    await auth.refreshAllSilently(); // 저장된 연결로 바로 (1시간 재연결 없음)
   }
   renderSide();
   renderBanner();
