@@ -1,0 +1,15 @@
+{
+  "name": "yb-mail",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "YB-Mail 두 Google 계정 통합 메일",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^8.3.8"
+  }
+}
