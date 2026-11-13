@@ -17,9 +17,27 @@ export const toB64url = (b64) => b64.replace(/\+/g, '-').replace(/\//g, '_').rep
 const wrap76 = (s) => s.replace(/.{1,76}/g, '$&\r\n').trimEnd();
 
 /** 글자 집합에 맞춰 바이트 → 문자열 (EUC-KR 등 포함) */
+const KOR = /^(euc-kr|ks_c_5601-1987|ks_c_5601|cp949|x-windows-949|windows-949|uhc|euc_kr|ksc5601|korean)$/;
+/** 바이트가 올바른 UTF-8이면 그 문자열, 아니면 null */
+function tryUtf8(bytes) {
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { return null; }
+}
+const hasMultibyte = (bytes) => { for (let i = 0; i < bytes.length; i++) if (bytes[i] >= 0x80) return true; return false; };
+/**
+ * 바이트 → 문자열. 표시된 글자 집합이 틀린 메일 대비:
+ *  · EUC-KR(ks_c_5601)이라 적혀 있지만 실제로는 UTF-8인 경우 → UTF-8로 (일부 업무 메일 시스템)
+ *  · UTF-8이라 적혀 있지만 UTF-8이 아닌 경우 → EUC-KR로
+ */
 export function decodeBytes(bytes, charset = 'utf-8') {
-  let cs = String(charset || 'utf-8').toLowerCase().replace(/^"|"$/g, '');
-  if (cs === 'ks_c_5601-1987' || cs === 'cp949' || cs === 'x-windows-949') cs = 'euc-kr';
+  let cs = String(charset || 'utf-8').toLowerCase().replace(/^"|"$/g, '').trim();
+  if (KOR.test(cs)) cs = 'euc-kr';
+  if (hasMultibyte(bytes)) {
+    if (cs === 'euc-kr') { const u = tryUtf8(bytes); if (u != null) return u; }
+    else if (cs === 'utf-8' || cs === 'utf8' || cs === 'us-ascii' || cs === 'ascii') {
+      const u = tryUtf8(bytes); if (u != null) return u;
+      try { return new TextDecoder('euc-kr').decode(bytes); } catch { /* 아래로 */ }
+    }
+  }
   try { return new TextDecoder(cs).decode(bytes); } catch { return new TextDecoder('utf-8').decode(bytes); }
 }
 
