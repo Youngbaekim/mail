@@ -1272,16 +1272,33 @@ function afterConnect() {
 /* ───────── 설정 메뉴 ───────── */
 let installEvt = null;
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || matchMedia('(display-mode: minimal-ui)').matches || navigator.standalone;
-/** 프로그램으로 설치되지 않았고, 브라우저가 설치를 지원하면 [설치하기] 단추 표시 */
-function syncInstall() { const off = !installEvt || isStandalone() || !!CPWIN; for (const id of ['#btn-install', '#btn-install2']) { const b = $(id); if (b) b.hidden = off; } }
+const inAppBrowser = () => /Electron|Claude/i.test(navigator.userAgent); // Claude 앱 안의 브라우저 등 (설치 불가)
+let installedApp = false;
+installEvt = window.__bip || null;
+/** 프로그램 창으로 열려 있지 않으면 [설치하기] 단추 표시 (브라우저가 설치 안내를 안 줘도 방법 안내) */
+function syncInstall() { const off = isStandalone() || installedApp || !!CPWIN; for (const id of ['#btn-install', '#btn-install2']) { const b = $(id); if (b) b.hidden = off; } }
+window.addEventListener('ybm-bip', () => { installEvt = window.__bip; syncInstall(); });
 window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvt = e; syncInstall(); });
-window.addEventListener('appinstalled', () => { installEvt = null; syncInstall(); toast('YB-Mail을 프로그램으로 설치했습니다. 바탕화면·시작 메뉴에서 여세요.', 7000); });
+window.addEventListener('appinstalled', () => { installEvt = null; installedApp = true; syncInstall(); toast('YB-Mail을 프로그램으로 설치했습니다. 바탕화면·시작 메뉴에서 여세요.', 7000); });
+(async () => { try { const r = await navigator.getInstalledRelatedApps?.(); if (r?.length) { installedApp = true; syncInstall(); } } catch { /* 무시 */ } })();
 async function doInstall() {
-  if (!installEvt) { toast('Chrome·Edge 주소창 오른쪽의 설치 아이콘(⊕)을 누르거나, 메뉴(⋮) → 앱 → "YB-Mail 설치"를 고르세요.', 9000); return; }
-  installEvt.prompt();
-  const r = await installEvt.userChoice.catch(() => ({ outcome: 'dismissed' }));
-  if (r.outcome !== 'accepted') toast('설치를 취소했습니다. 언제든 [설치하기]를 다시 누르면 됩니다.');
-  installEvt = null; syncInstall();
+  if (installEvt) {
+    installEvt.prompt();
+    const r = await installEvt.userChoice.catch(() => ({ outcome: 'dismissed' }));
+    if (r.outcome !== 'accepted') toast('설치를 취소했습니다. 언제든 [설치하기]를 다시 누르면 됩니다.');
+    installEvt = null; window.__bip = null;
+    return;
+  }
+  const url = location.origin + location.pathname;
+  if (inAppBrowser()) {
+    try { await navigator.clipboard.writeText(url); } catch { /* 무시 */ }
+    await askChoice('설치하기', `<p class="modal-tip">지금 화면(Claude 앱 안의 브라우저)에서는 프로그램 설치가 되지 않습니다.<br><b>Chrome</b>이나 <b>Edge</b>를 열고 주소창에 아래 주소를 붙여넣은 뒤 [설치하기]를 누르세요. (주소는 복사해 두었습니다)</p><p class="inst-url">${esc(url)}</p>`, [['ok', '확인', 'btn-primary']]);
+    return;
+  }
+  await askChoice('설치하기', `<p class="modal-tip">브라우저가 아직 설치 준비를 알려 주지 않았습니다. 아래 방법으로 바로 설치할 수 있습니다.</p>
+    <ol class="inst-steps"><li><b>Chrome</b>: 주소창 오른쪽 끝의 <b>설치 아이콘(⊕ 모니터 모양)</b> 누르기<br>또는 메뉴 <b>⋮ → 전송, 저장, 공유 → 페이지를 앱으로 설치</b></li>
+    <li><b>Edge</b>: 메뉴 <b>… → 앱 → 이 사이트를 앱으로 설치</b></li>
+    <li>이미 설치했다면: 바탕화면·시작 메뉴의 <b>YB-Mail</b> 아이콘으로 여세요.</li></ol>`, [['ok', '확인', 'btn-primary']]);
 }
 
 /* ───────── 새 메일 알림 (받은편지함만, 앱이 열려 있는 동안) ───────── */
@@ -1921,6 +1938,7 @@ async function boot() {
   $('#version').textContent = DEMO ? `v${VERSION} · 점검용` : `v${VERSION}`;
   state.unread = pref.get('unread', {});
   bind();
+  syncInstall();
   document.body.classList.remove('booting');
   if (CPWIN) {
     // 별도 쓰기 창: 본 창에서 넘겨준 내용으로 쓰기 화면만 띄움

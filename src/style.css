@@ -349,6 +349,8 @@ button.acc-state.off:hover { outline: 1px solid var(--warn); }
 .btn-install { padding: 5px 11px; border-radius: 14px; background: linear-gradient(135deg, #3f86f0, #1e55b8); color: #fff; font-size: 12.5px; font-weight: 700; white-space: nowrap; box-shadow: 0 2px 8px rgba(30,85,184,.35); animation: ybpulse 2.4s ease-in-out 3; }
 .btn-install:hover { filter: brightness(1.08); }
 .only-drawer-inst { display: none; }
+.inst-url { padding: 8px 10px; border-radius: 8px; background: var(--side); font-family: ui-monospace, Consolas, monospace; font-size: 13px; user-select: all; }
+.inst-steps { margin: 0 0 12px; padding-left: 20px; font-size: 13.5px; line-height: 1.8; }
 @media (max-width: 1180px) { .only-drawer-inst:not([hidden]) { display: inline-block; } }
 @keyframes ybpulse { 50% { box-shadow: 0 0 0 5px rgba(63,134,240,.25); } }
 .notif-ask { display: flex; align-items: center; gap: 8px; margin: 0 12px 8px; padding: 9px 10px; border-radius: 10px; background: var(--accent-soft); font-size: 13px; }

@@ -53,5 +53,11 @@
   "categories": [
     "productivity",
     "business"
+  ],
+  "related_applications": [
+    {
+      "platform": "webapp",
+      "url": "https://youngbaekim.github.io/mail/manifest.webmanifest"
+    }
   ]
 }
