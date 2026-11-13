@@ -20,10 +20,12 @@ async function call(email, path, { method = 'GET', body, query } = {}) {
       body: body ? JSON.stringify(body) : undefined,
     });
     if (r.status === 401) { dropToken(email); throw new AuthError(email); }
-    if ((r.status === 429 || r.status >= 500) && attempt < 2) { await new Promise((s) => setTimeout(s, 800 * (attempt + 1))); continue; }
+    if ((r.status === 429 || r.status >= 500) && attempt < 4) { await new Promise((s) => setTimeout(s, 1000 * 2 ** attempt + Math.random() * 400)); continue; }
     if (!r.ok) {
-      let msg = `${r.status}`;
-      try { const j = await r.json(); msg = j.error?.message || msg; } catch { /* 무시 */ }
+      let msg = `${r.status}`, reason = '';
+      try { const j = await r.json(); msg = j.error?.message || msg; reason = j.error?.errors?.[0]?.reason || j.error?.status || ''; } catch { /* 무시 */ }
+      // Gmail 사용량 한도(초당 요청 수)에 걸리면 403으로 옴 → 잠시 쉬었다가 다시
+      if (r.status === 403 && /rate|quota|limit/i.test(reason + msg) && attempt < 4) { await new Promise((s) => setTimeout(s, 1500 * 2 ** attempt + Math.random() * 500)); continue; }
       if (r.status === 403 && /insufficient|scope/i.test(msg)) { dropToken(email); throw new AuthError(email, '메일 권한이 부족합니다. 다시 연결해 주세요.'); }
       throw new Error(`Gmail 오류 (${email}): ${msg}`);
     }
@@ -103,7 +105,7 @@ function decodeEntities(s) {
 export async function listThreads(email, { labelIds, q, pageToken, max = 25 } = {}) {
   const r = await call(email, 'threads', { query: { labelIds, q: q || undefined, pageToken, maxResults: max } });
   const me = email.toLowerCase();
-  const threads = await pool(r.threads || [], 8, async (t) => {
+  const threads = await pool(r.threads || [], 5, async (t) => {
     try { return await ensureSummary(email, t, me); } catch (e) { if (e instanceof AuthError) throw e; return null; }
   });
   return { threads: threads.filter(Boolean), nextPageToken: r.nextPageToken || null };
@@ -229,7 +231,7 @@ export async function prefetch(email, { limit = 200, onProgress, shouldStop } = 
     if (!(await hasFull(email, t.id))) need.push(t.id); else done++;
   }
   onProgress?.(done, list.length);
-  await pool(need, 3, async (id) => {
+  await pool(need, 2, async (id) => {
     if (shouldStop?.()) return;
     try {
       const raw = await fetchFull(email, id);

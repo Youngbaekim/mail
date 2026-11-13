@@ -82,7 +82,7 @@ function requestToken(override) {
       scope: SCOPES,
       callback: (r) => {
         if (r.error) { reject(new Error(errText(r.error, r.error_description))); return; }
-        if (!google.accounts.oauth2.hasGrantedAllScopes(r, SCOPES)) {
+        if (!google.accounts.oauth2.hasGrantedAllScopes(r, ...SCOPES.split(' '))) {
           reject(new Error('권한 항목 중 체크하지 않은 것이 있습니다. 다시 연결하면서 Gmail 관련 항목(메일·설정)을 모두 체크해 주세요.'));
           return;
         }
