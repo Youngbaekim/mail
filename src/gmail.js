@@ -1,6 +1,7 @@
 // Gmail API 호출 — 계정(email)마다 해당 계정 토큰으로 호출
 import { token, dropToken, AuthError } from './auth.js';
 import { parsePayload, hdr, parseAddrList, toB64url, bytesToB64 } from './mime.js';
+import * as cache from './cache.js';
 
 const BASE = 'https://gmail.googleapis.com/gmail/v1/users/me/';
 let backend = null; // 점검용 가짜 서버 (?demo)
@@ -57,7 +58,6 @@ function summarize(email, t, myEmail) {
   const first = msgs[0] || {};
   const labels = new Set(msgs.flatMap((m) => m.labelIds || []));
   const h = (m, n) => hdr(m.payload?.headers, n);
-  // 보낸 사람 묶음: 내가 보낸 건 '나'
   const senders = [];
   for (const m of msgs) {
     const f = h(m, 'From');
@@ -70,6 +70,7 @@ function summarize(email, t, myEmail) {
     key: `${email}|${t.id}`,
     account: email,
     id: t.id,
+    historyId: t.historyId || '',
     subject: h(first, 'Subject') || '(제목 없음)',
     from: h(lastIn, 'From'),
     to: h(last, 'To'),
@@ -96,25 +97,56 @@ function decodeEntities(s) {
 }
 
 /**
- * 스레드 목록 (한 계정)
+ * 스레드 목록 (한 계정) — 기기 저장본과 historyId가 같으면 다시 받지 않음
  * @param {object} o { labelIds:[], q, pageToken, max }
  */
 export async function listThreads(email, { labelIds, q, pageToken, max = 25 } = {}) {
   const r = await call(email, 'threads', { query: { labelIds, q: q || undefined, pageToken, maxResults: max } });
-  const ids = (r.threads || []).map((t) => t.id);
   const me = email.toLowerCase();
-  const threads = await pool(ids, 8, async (id) => {
-    try {
-      const t = await call(email, `threads/${id}`, { query: { format: 'metadata', metadataHeaders: META } });
-      return summarize(email, t, me);
-    } catch (e) { if (e instanceof AuthError) throw e; return null; }
+  const threads = await pool(r.threads || [], 8, async (t) => {
+    try { return await ensureSummary(email, t, me); } catch (e) { if (e instanceof AuthError) throw e; return null; }
   });
   return { threads: threads.filter(Boolean), nextPageToken: r.nextPageToken || null };
 }
 
-/** 스레드 전체 (본문 포함) */
-export async function getThread(email, id) {
-  const t = await call(email, `threads/${id}`, { query: { format: 'full' } });
+/** 요약 확보: 저장본이 최신이면 그대로, 아니면 머리글만 받아 갱신(본문은 메시지 구성이 같으면 유지) */
+async function ensureSummary(email, t, me) {
+  const key = `${email}|${t.id}`;
+  const rec = await cache.getThread(key);
+  if (rec && rec.summary && rec.historyId === t.historyId) return rec.summary;
+  const meta = await call(email, `threads/${t.id}`, { query: { format: 'metadata', metadataHeaders: META } });
+  const summary = summarize(email, meta, me);
+  let raw = rec?.raw || null;
+  if (raw) {
+    const ids = new Set(raw.messages.map((m) => m.id));
+    const same = meta.messages.length === raw.messages.length && meta.messages.every((m) => ids.has(m.id));
+    if (same) {
+      const byId = Object.fromEntries(meta.messages.map((m) => [m.id, m.labelIds || []]));
+      raw.messages.forEach((m) => { m.labelIds = byId[m.id]; });
+      raw.historyId = meta.historyId;
+    } else raw = null; // 새 메시지가 붙음 → 본문 다시 받기
+  }
+  await cache.putThread({ key, account: email, id: t.id, historyId: meta.historyId || t.historyId, date: summary.date, summary, raw });
+  return summary;
+}
+
+/** 스레드 본문 원문 — 저장본 우선, 없으면 받아서 저장 */
+export async function fetchFull(email, id, { force = false } = {}) {
+  const key = `${email}|${id}`;
+  const rec = await cache.getThread(key);
+  if (!force && rec?.raw) return rec.raw;
+  const raw = await call(email, `threads/${id}`, { query: { format: 'full' } });
+  const summary = summarize(email, raw, email.toLowerCase());
+  await cache.putThread({ key, account: email, id, historyId: raw.historyId, date: summary.date, summary, raw });
+  return raw;
+}
+export async function hasFull(email, id) {
+  const rec = await cache.getThread(`${email}|${id}`);
+  return !!rec?.raw;
+}
+
+/** 원문 → 화면용 */
+export function parseThread(email, t) {
   const messages = (t.messages || []).map((m) => {
     const H = m.payload?.headers;
     const body = parsePayload(m.payload);
@@ -135,12 +167,87 @@ export async function getThread(email, id) {
       ...body,
     };
   });
-  return { id: t.id, account: email, messages };
+  return { id: t.id, account: email, historyId: t.historyId, messages };
 }
 
-export async function getAttachment(email, msgId, attId) {
+export async function getThread(email, id, opts) {
+  return parseThread(email, await fetchFull(email, id, opts));
+}
+
+/** 메시지 원본(.eml) */
+export async function getRawEml(email, msgId) {
+  const r = await call(email, `messages/${msgId}`, { query: { format: 'raw' } });
+  return r.raw;
+}
+
+/** 첨부 내용(base64url) — 10MB 이하는 기기에 보관 */
+export async function getAttachment(email, msgId, attId, { name = '', size = 0 } = {}) {
+  const key = `${email}|${msgId}|${name}|${size}`;
+  const hit = name ? await cache.getAtt(key) : null;
+  if (hit) return hit;
   const r = await call(email, `messages/${msgId}/attachments/${attId}`);
-  return r.data; // base64url
+  if (name && (r.size || size) <= 10 * 1024 * 1024) cache.putAtt(key, r.data);
+  return r.data;
+}
+
+/** 여러 스레드 한꺼번에 라벨 변경 */
+export const modifyMany = (email, ids, add = [], remove = []) => pool(ids, 5, (id) => modifyThread(email, id, add, remove));
+export const trashMany = (email, ids) => pool(ids, 5, (id) => trashThread(email, id));
+export const untrashMany = (email, ids) => pool(ids, 5, (id) => untrashThread(email, id));
+
+/** 편지함 전체 읽음 처리 (최대 500개 대화) */
+export async function markAllRead(email, label) {
+  let pageToken, n = 0;
+  do {
+    const r = await call(email, 'threads', { query: { labelIds: label === 'ALL' ? undefined : [label], q: 'is:unread', maxResults: 100, pageToken } });
+    const ids = (r.threads || []).map((t) => t.id);
+    await modifyMany(email, ids, [], ['UNREAD']);
+    n += ids.length;
+    pageToken = r.nextPageToken;
+  } while (pageToken && n < 500);
+  return n;
+}
+
+/** 미리 받기 — 받은편지함 최근 limit개 대화의 본문을 기기에 저장 (진행 상황 콜백) */
+export async function prefetch(email, { limit = 200, onProgress, shouldStop } = {}) {
+  const me = email.toLowerCase();
+  const list = [];
+  let pageToken;
+  while (list.length < limit) {
+    const r = await call(email, 'threads', { query: { labelIds: ['INBOX'], maxResults: Math.min(100, limit - list.length), pageToken } });
+    list.push(...(r.threads || []));
+    pageToken = r.nextPageToken;
+    if (!pageToken) break;
+  }
+  let done = 0;
+  const need = [];
+  for (const t of list) {
+    if (shouldStop?.()) return;
+    await ensureSummary(email, t, me).catch(() => null);
+    if (!(await hasFull(email, t.id))) need.push(t.id); else done++;
+  }
+  onProgress?.(done, list.length);
+  await pool(need, 3, async (id) => {
+    if (shouldStop?.()) return;
+    try {
+      const raw = await fetchFull(email, id);
+      await prefetchInline(email, raw);
+    } catch (e) { if (e instanceof AuthError) throw e; }
+    onProgress?.(++done, list.length);
+  });
+  await cache.prune(email, 600);
+}
+
+/** 본문 속 그림(cid) 미리 받기 (각 500KB 이하) */
+export async function prefetchInline(email, raw) {
+  for (const m of raw.messages || []) {
+    const { attachments } = parsePayload(m.payload);
+    for (const a of attachments) {
+      if (a.contentId && a.attachmentId && a.size <= 500 * 1024) {
+        await getAttachment(email, m.id, a.attachmentId, { name: a.filename, size: a.size }).catch(() => null);
+      }
+    }
+  }
 }
 
 export const modifyThread = (email, id, add = [], remove = []) =>

@@ -40,10 +40,12 @@ function msg(acc, tid, { from, to, cc, subject, min, labels = ['INBOX'], text, h
     },
   };
 }
+let hist = 5000;
 function thread(acc, list) {
   const tid = 't' + (++seq);
-  db[acc].threads.set(tid, { id: tid, messages: list.map((m) => msg(acc, tid, m)) });
+  db[acc].threads.set(tid, { id: tid, historyId: String(++hist), messages: list.map((m) => msg(acc, tid, m)) });
 }
+const bump = (t) => { t.historyId = String(++hist); };
 
 // 1×1 파란 점 (본문 안 그림 점검)
 const DOT = 'iVBORw0KGgoAAAANSUhEUgAAADAAAAAMCAYAAAAkuj5RAAAAL0lEQVR4nGPQz7_2fyhjhoF2wKgHBtoBox4YaAeMemCgHTDqgYF2wKgHBtoBlGIAvXGDDMBqICcAAAAASUVORK5CYII';
@@ -113,24 +115,27 @@ export function demoBackend(email, method, path, q, body) {
     }).sort((a, b) => tDate(b) - tDate(a));
     const start = Number(q.pageToken || 0), max = Number(q.maxResults || 25);
     const page = list.slice(start, start + max);
-    return delay({ threads: page.map((t) => ({ id: t.id })), nextPageToken: start + max < list.length ? String(start + max) : undefined });
+    return delay({ threads: page.map((t) => ({ id: t.id, historyId: t.historyId })), nextPageToken: start + max < list.length ? String(start + max) : undefined });
   }
-  if ((m = /^threads\/(\w+)$/.exec(path))) return delay(fmtThread(D.threads.get(m[1]), q.format));
+  if ((m = /^threads\/(\w+)$/.exec(path))) { window.__ybCalls = window.__ybCalls || { metadata: 0, full: 0 }; window.__ybCalls[q.format] = (window.__ybCalls[q.format] || 0) + 1; return delay(fmtThread(D.threads.get(m[1]), q.format)); }
   if ((m = /^threads\/(\w+)\/modify$/.exec(path))) {
     const t = D.threads.get(m[1]);
     for (const x of t.messages) {
       x.labelIds = x.labelIds.filter((l) => !(body.removeLabelIds || []).includes(l));
       for (const l of body.addLabelIds || []) if (!x.labelIds.includes(l)) x.labelIds.push(l);
     }
+    bump(t);
     return delay({});
   }
   if ((m = /^threads\/(\w+)\/(un)?trash$/.exec(path))) {
     const t = D.threads.get(m[1]);
     for (const x of t.messages) x.labelIds = m[2] ? x.labelIds.filter((l) => l !== 'TRASH') : [...x.labelIds.filter((l) => l !== 'INBOX'), 'TRASH'];
     if (m[2]) t.messages.forEach((x) => { if (!x.labelIds.includes('SENT')) x.labelIds.push('INBOX'); });
+    bump(t);
     return delay({});
   }
-  if ((m = /^messages\/\w+\/attachments\/(\w+)$/.exec(path))) return delay({ data: D.att[m[1]] });
+  if ((m = /^messages\/\w+\/attachments\/(\w+)$/.exec(path))) { window.__ybAttCalls = (window.__ybAttCalls || 0) + 1; return delay({ data: D.att[m[1]], size: Math.round(D.att[m[1]].length * 0.75) }); }
+  if ((m = /^messages\/(\w+)$/.exec(path)) && q.format === 'raw') return delay({ raw: b64u('From: demo@demo\r\nSubject: demo\r\n\r\n(점검용 원본)\r\n') });
   if (path === 'messages/send') {
     const raw = decodeBytes(b64ToBytes(body.raw));
     sent.push({ account: email, raw, threadId: body.threadId });
@@ -138,7 +143,8 @@ export function demoBackend(email, method, path, q, body) {
     const subj = /^Subject: (.*(?:\r\n .*)*)/m.exec(raw)?.[1] || '';
     const decoded = subj.replace(/=\?UTF-8\?B\?([^?]+)\?=(\r\n )?/g, (_, b) => decodeBytes(b64ToBytes(b)));
     const tid = body.threadId || 't' + (++seq);
-    if (!D.threads.has(tid)) D.threads.set(tid, { id: tid, messages: [] });
+    if (!D.threads.has(tid)) D.threads.set(tid, { id: tid, historyId: '0', messages: [] });
+    bump(D.threads.get(tid));
     D.threads.get(tid).messages.push(msg(email, tid, { from: `김영배 <${email}>`, to: (/^To: (.*)$/m.exec(raw) || [])[1], subject: decoded, min: 0, labels: ['SENT'], text: '(YB-Mail 점검용으로 보낸 메일)' }));
     return delay({ id: 'm' + seq, threadId: tid });
   }

@@ -80,7 +80,7 @@ function dispName(name) {
 }
 
 /**
- * @param {object} m { from:{name,email}, to, cc, bcc, subject, text, html, inReplyTo, references, attachments:[{name,type,bytes}] }
+ * @param {object} m { from:{name,email}, to, cc, bcc, subject, text, html, inReplyTo, references, attachments:[{name,type,bytes}], inline:[{cid,name,type,bytes}] }
  * @returns {string} 메일 원문(ASCII 문자열)
  */
 export function buildRaw(m) {
@@ -96,10 +96,21 @@ export function buildRaw(m) {
   H.push('MIME-Version: 1.0');
   H.push('X-Mailer: YB-Mail');
 
+  // 본문 속 그림(붙여넣은 캡처)은 multipart/related + Content-ID 로 넣어야 Gmail·Outlook에서 보임
+  let htmlPart = b64Part('text/html', m.html || '');
+  if (m.inline?.length) {
+    const bRel = boundary();
+    htmlPart = `Content-Type: multipart/related; boundary="${bRel}"\r\n\r\n--${bRel}\r\n${htmlPart}`;
+    for (const im of m.inline) {
+      htmlPart += `--${bRel}\r\nContent-Type: ${im.type}; name="${im.name}"\r\nContent-Transfer-Encoding: base64\r\n` +
+        `Content-ID: <${im.cid}>\r\nContent-Disposition: inline; filename="${im.name}"\r\n\r\n${wrap76(bytesToB64(im.bytes))}\r\n`;
+    }
+    htmlPart += `--${bRel}--\r\n`;
+  }
   const bAlt = boundary();
   const alt = `Content-Type: multipart/alternative; boundary="${bAlt}"\r\n\r\n` +
     `--${bAlt}\r\n${b64Part('text/plain', m.text || '')}` +
-    `--${bAlt}\r\n${b64Part('text/html', m.html || '')}` +
+    `--${bAlt}\r\n${htmlPart}` +
     `--${bAlt}--\r\n`;
 
   let body;

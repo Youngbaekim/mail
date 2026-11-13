@@ -3,11 +3,15 @@ import './style.css';
 import { getTheme, setTheme } from './theme.js';
 import * as auth from './auth.js';
 import * as gm from './gmail.js';
+import * as cache from './cache.js';
+import { setupEditor, extractInline } from './editor.js';
 import { buildRaw, parseAddrList, validEmail, escHtml, textToHtml, htmlToText, b64ToBytes } from './mime.js';
 import { ACCOUNT_COLORS } from './config.js';
 
 const VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev';
-const DEMO = new URLSearchParams(location.search).has('demo');
+const PARAMS = new URLSearchParams(location.search);
+const DEMO = PARAMS.has('demo');
+const CPWIN = PARAMS.get('cpwin'); // 별도 창에서 메일 쓰기
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = escHtml;
@@ -37,13 +41,16 @@ const state = {
   pages: {},          // email → 다음 쪽 토큰(null이면 끝)
   loading: false,
   loadSeq: 0,
-  sel: null,          // 선택한 스레드 key
-  thread: null,       // 읽는 중인 스레드
-  unread: {},         // email → 받은편지함 안읽음 수
-  labels: {},         // email → 사용자 라벨
+  sel: null,          // 읽는 중인 스레드 key
+  checked: new Set(), // 선택(복수)한 스레드 key
+  anchor: null,       // Shift 범위 선택 기준
+  thread: null,
+  unread: {},
+  labels: {},
   expanded: new Set(pref.get('expanded', [])),
   showImages: pref.get('showImages', true),
-  authErr: new Set(), // 다시 연결 필요한 계정
+  undoSec: pref.get('undoSec', 30),
+  prefetchN: pref.get('prefetchN', 200),
 };
 
 /* ───────── 공용 ───────── */
@@ -51,6 +58,8 @@ const accs = () => auth.accounts();
 const acc = (email) => accs().find((a) => a.email === email) || { email, color: '#888', label: '?' };
 const connected = () => accs().filter((a) => auth.token(a.email));
 const accLabel = (a) => a.label || a.email.split('@')[0];
+const folderKey = (f = state.folder) => `${f.scope}|${f.label}`;
+const sigHtml = (a) => a.signatureHtml ?? (a.signature ? textToHtml(a.signature) : '');
 
 let toastTimer;
 function toast(msg, ms = 3200, action) {
@@ -61,10 +70,11 @@ function toast(msg, ms = 3200, action) {
   clearTimeout(toastTimer);
   if (ms) toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
+let syncLock = '';
 function setSync(s, text) { const el = $('#sync'); el.dataset.s = s; el.textContent = text; }
 function fail(e, where = '') {
   console.warn('[YB-Mail]', where, e);
-  if (e instanceof auth.AuthError) { state.authErr.add(e.email); renderBanner(); renderSide(); return; }
+  if (e instanceof auth.AuthError) { renderBanner(); renderSide(); return; }
   toast(e.message || String(e), 5000);
 }
 
@@ -97,6 +107,8 @@ const sizeText = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : n >= 1
 const fileIcon = (t, n = '') => (/^image\//.test(t) ? '🖼' : /pdf/.test(t) || /\.pdf$/i.test(n) ? '📕' : /sheet|excel|\.xlsx?$/i.test(t + n) ? '📗' : /word|\.docx?$|\.hwpx?$/i.test(t + n) ? '📘' : /presentation|powerpoint|\.pptx?$/i.test(t + n) ? '📙' : /zip|compressed/.test(t) ? '🗜' : '📄');
 const initial = (from) => { const a = parseAddrList(from)[0]; const s = (a?.name || a?.email || '?').replace(/["']/g, '').trim(); return s.slice(0, 1).toUpperCase(); };
 const isMine = (from) => { const a = parseAddrList(from)[0]; return !!a && accs().some((x) => x.email === a.email.toLowerCase()); };
+const PALETTE = ['#5b7fbf', '#3f9b7a', '#c0703a', '#8f5fbf', '#bf5b7f', '#4d9bb3', '#9a8a3a', '#6b7a8f'];
+function colorOf(s) { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; }
 
 /* ───────── 연락처 (받는 사람 자동 완성) ───────── */
 const contacts = new Map(Object.entries(pref.get('contacts', {})));
@@ -118,6 +130,27 @@ setInterval(() => {
   const top = [...contacts.entries()].sort((a, b) => b[1].c - a[1].c).slice(0, 600);
   pref.set('contacts', Object.fromEntries(top));
 }, 10_000);
+
+/* ───────── 팝업 메뉴 (우클릭 등) ───────── */
+function showPop(at, html, onPick) {
+  const p = $('#pop');
+  p.innerHTML = html;
+  p.hidden = false;
+  const w = p.offsetWidth, h = p.offsetHeight;
+  let x, y;
+  if (at instanceof Element) { const r = at.getBoundingClientRect(); x = r.left; y = r.bottom + 6; if (y + h > innerHeight) y = r.top - h - 6; }
+  else { x = at.x; y = at.y; if (y + h > innerHeight - 8) y = Math.max(8, at.y - h); }
+  p.style.left = `${Math.max(8, Math.min(x, innerWidth - w - 8))}px`;
+  p.style.top = `${Math.max(8, Math.min(y, innerHeight - h - 8))}px`;
+  p.onclick = (e) => {
+    const b = e.target.closest('[data-k]');
+    if (!b || b.disabled) return;
+    closePop();
+    onPick?.(b.dataset.k, b);
+  };
+}
+const closePop = () => ($('#pop').hidden = true);
+const mi = (k, label, { icon = '', dis = false, cls = '', hint = '' } = {}) => `<button data-k="${k}" class="${cls}"${dis ? ' disabled' : ''}><span class="pi">${icon}</span>${label}${hint ? `<span class="k">${hint}</span>` : ''}</button>`;
 
 /* ───────── 1열: 편지함 ───────── */
 function folderName(f = state.folder) {
@@ -156,17 +189,25 @@ function renderSide() {
   try { if (total) navigator.setAppBadge?.(total); else navigator.clearAppBadge?.(); } catch { /* 무시 */ }
 }
 
-function selectFolder(scope, label) {
+async function selectFolder(scope, label) {
   if (scope !== 'all' && !accs().some((a) => a.email === scope)) scope = 'all';
   if (scope === 'all' && !ALL_FOLDERS.includes(label)) label = 'INBOX';
   state.folder = { scope, label };
   pref.set('folder', state.folder);
   state.sel = null;
   state.thread = null;
+  state.checked.clear();
   document.body.classList.remove('drawer');
   renderSide();
   renderReader();
-  loadList();
+  // 기기 저장본으로 먼저 보여 주고, 서버에서 새로 확인
+  const seq = ++state.loadSeq;
+  const cached = !state.q && !state.unreadOnly ? await cache.getList(folderKey()) : null;
+  if (seq !== state.loadSeq) return;
+  state.items = (cached || []).filter((t) => accs().some((a) => a.email === t.account));
+  state.pages = {};
+  renderList();
+  loadList({ silent: state.items.length > 0 });
 }
 
 /* ───────── 2열: 목록 ───────── */
@@ -198,13 +239,15 @@ function renderList() {
   }
   const multi = state.folder.scope === 'all';
   const sent = state.folder.label === 'SENT';
+  const trash = state.folder.label === 'TRASH';
   let h = '', grp = '';
   for (const t of state.items) {
     const g = dayGroup(t.date);
     if (g !== grp) { grp = g; h += `<li class="day-h">${g}</li>`; }
     const a = acc(t.account);
     const who = sent ? `받는 사람: ${gm.shortName(t.to) || '(없음)'}` : (t.senders.length > 1 ? t.senders.slice(-3).join(', ') : gm.shortName(t.from) || t.senders[0] || '(알 수 없음)');
-    h += `<li class="item${t.unread ? ' unread' : ''}${t.key === state.sel ? ' active' : ''}" data-key="${esc(t.key)}" style="--acc:${a.color}">
+    const cls = [t.unread && 'unread', t.key === state.sel && 'active', state.checked.has(t.key) && 'sel'].filter(Boolean).join(' ');
+    h += `<li class="item ${cls}" data-key="${esc(t.key)}" style="--acc:${a.color}">
       <div class="i-main">
         <div class="i-row"><span class="i-from">${esc(who)}</span>${t.count > 1 ? `<span class="i-cnt">${t.count}</span>` : ''}<span class="i-tags">${t.hasAttach ? '📎' : ''}${t.starred ? '<span class="i-star">★</span>' : ''}</span><span class="i-date">${shortDate(t.date)}</span></div>
         <div class="i-row"><span class="i-subj">${esc(t.subject)}</span>${multi ? `<span class="acc-tag">${esc(accLabel(a))}</span>` : ''}</div>
@@ -212,8 +255,8 @@ function renderList() {
       </div>
       <div class="i-acts">
         ${state.folder.label === 'INBOX' ? '<button data-iact="archive" title="보관">🗄</button>' : ''}
-        <button data-iact="trash" title="${state.folder.label === 'TRASH' ? '복원' : '삭제'}">${state.folder.label === 'TRASH' ? '♻' : '🗑'}</button>
-        <button data-iact="unread" title="${t.unread ? '읽음으로' : '읽지 않음으로'}">${t.unread ? '✉' : '✉'}</button>
+        <button data-iact="${trash ? 'untrash' : 'trash'}" title="${trash ? '복원' : '삭제'}">${trash ? '♻' : '🗑'}</button>
+        <button data-iact="${t.unread ? 'read' : 'unread'}" title="${t.unread ? '읽음으로' : '읽지 않음으로'}">✉</button>
       </div>
     </li>`;
   }
@@ -228,13 +271,13 @@ function query() {
 }
 
 async function loadList({ append = false, silent = false } = {}) {
-  const seq = ++state.loadSeq;
+  const seq = append ? state.loadSeq : ++state.loadSeq;
   const f = state.folder;
   const targets = (f.scope === 'all' ? accs() : accs().filter((a) => a.email === f.scope)).filter((a) => auth.token(a.email));
-  if (!append) { if (!silent) { state.items = []; state.pages = {}; } }
+  if (!append && !silent) { state.items = []; state.pages = {}; }
   state.loading = true;
   if (!silent) renderList();
-  setSync('pending', '● 불러오는 중…');
+  if (!syncLock) setSync('pending', '● 확인 중…');
   const { labelIds, q } = query();
   const res = await Promise.allSettled(targets.map(async (a) => {
     if (append && !state.pages[a.email]) return null;
@@ -247,11 +290,10 @@ async function loadList({ append = false, silent = false } = {}) {
   const keep = append ? [...state.items] : [];
   const pages = append ? { ...state.pages } : {};
   for (const [i, r] of res.entries()) {
-    if (r.status === 'rejected') { err++; fail(r.reason, 'list'); if (silent) keep.push(...state.items.filter((t) => t.account === targets[i].email)); continue; }
+    if (r.status === 'rejected') { err++; fail(r.reason, 'list'); if (silent && !append) keep.push(...state.items.filter((t) => t.account === targets[i].email)); continue; }
     if (!r.value) continue;
     const { email, threads, nextPageToken } = r.value;
     if (silent && !append) {
-      // 새로 받은 첫 쪽 + 그보다 오래된 기존 항목
       const oldest = threads.length ? Math.min(...threads.map((t) => t.date)) : Infinity;
       const keys = new Set(threads.map((t) => t.key));
       const older = nextPageToken ? state.items.filter((t) => t.account === email && t.date < oldest && !keys.has(t.key)) : [];
@@ -264,12 +306,18 @@ async function loadList({ append = false, silent = false } = {}) {
     }
     for (const t of threads) learn(t.from, 0.2);
   }
-  state.items = keep.sort((a, b) => b.date - a.date);
+  // 연결이 끊긴 계정의 저장본은 그대로 보여 줌
+  if (!append) for (const a of accs()) if (!targets.includes(a) && (f.scope === 'all' || f.scope === a.email)) keep.push(...state.items.filter((t) => t.account === a.email));
+  const uniq = new Map(keep.map((t) => [t.key, t]));
+  state.items = [...uniq.values()].sort((a, b) => b.date - a.date);
   state.pages = pages;
-  for (const a of targets) if (!auth.token(a.email)) state.authErr.add(a.email);
+  for (const k of [...state.checked]) if (!uniq.has(k)) state.checked.delete(k);
   renderList();
   renderBanner();
-  if (!navigator.onLine) setSync('offline', '● 오프라인');
+  if (!q && !append) cache.putList(folderKey(f), state.items);
+  queueVisible();
+  if (syncLock) return;
+  if (!navigator.onLine) setSync('offline', '● 오프라인 (저장본 표시 중)');
   else if (err) setSync('error', `● 일부 계정 오류 (${err})`);
   else setSync('ok', `● ${new Date().toTimeString().slice(0, 5)} 확인`);
 }
@@ -280,14 +328,61 @@ async function refreshCounts() {
     state.unread[a.email] = await gm.unreadCount(a.email, 'INBOX');
     if (!state.labels[a.email]) state.labels[a.email] = await gm.listLabels(a.email);
   }));
+  pref.set('unread', state.unread);
   renderSide();
+}
+
+/* ───────── 미리 받기 (기기 저장) ───────── */
+const bg = { queue: [], busy: 0, running: false, stop: false };
+/** 지금 목록에 보이는 앞쪽 메일 본문을 먼저 받아 둠 */
+function queueVisible() {
+  const top = state.items.slice(0, 40).filter((t) => auth.token(t.account));
+  bg.queue = [...top.map((t) => t.key), ...bg.queue.filter((k) => !top.some((t) => t.key === k))].slice(0, 200);
+  pump();
+}
+function queueNear(key) {
+  const i = state.items.findIndex((t) => t.key === key);
+  if (i < 0) return;
+  const near = [state.items[i + 1], state.items[i + 2], state.items[i - 1], state.items[i + 3]].filter(Boolean).map((t) => t.key);
+  bg.queue = [...near, ...bg.queue.filter((k) => !near.includes(k))];
+  pump();
+}
+async function pump() {
+  while (bg.busy < 2 && bg.queue.length) {
+    const key = bg.queue.shift();
+    const [email, id] = key.split('|');
+    if (!auth.token(email)) continue;
+    bg.busy++;
+    (async () => {
+      try {
+        if (!(await gm.hasFull(email, id))) { const raw = await gm.fetchFull(email, id); await gm.prefetchInline(email, raw); }
+      } catch { /* 무시 */ } finally { bg.busy--; pump(); }
+    })();
+  }
+}
+async function runPrefetch() {
+  if (bg.running || !state.prefetchN || DEMO && bg.ranOnce) return;
+  bg.running = true; bg.ranOnce = true;
+  try {
+    for (const a of connected()) {
+      await gm.prefetch(a.email, {
+        limit: state.prefetchN,
+        shouldStop: () => !auth.token(a.email),
+        onProgress: (d, n) => {
+          if (d < n) { syncLock = 'prefetch'; setSync('pending', `● 미리 받기 ${accLabel(a)} ${d}/${n}`); }
+          else { syncLock = ''; setSync('ok', `● ${new Date().toTimeString().slice(0, 5)} 확인 · 저장 완료`); }
+        },
+      }).catch((e) => console.warn('prefetch', e));
+    }
+  } finally { bg.running = false; syncLock = ''; }
 }
 
 /* ───────── 3열: 읽기 ───────── */
 const current = () => state.items.find((t) => t.key === state.sel) || null;
+const checkedItems = () => state.items.filter((t) => state.checked.has(t.key));
 
 function setReadButtons() {
-  const t = current() || (state.thread && { starred: state.thread.messages.some((m) => m.labelIds.includes('STARRED')) });
+  const t = current();
   const on = !!state.thread;
   $$('.read-head [data-act]').forEach((b) => (b.disabled = !on));
   const star = $('.read-head [data-act="star"]');
@@ -299,7 +394,28 @@ function setReadButtons() {
   $('.read-head [data-act="archive"]').hidden = state.folder.label !== 'INBOX';
 }
 
+function renderMulti() {
+  const n = state.checked.size;
+  $('#reader').hidden = false;
+  $('#empty-read').hidden = true;
+  $$('.read-head [data-act]').forEach((b) => (b.disabled = true));
+  const trash = state.folder.label === 'TRASH';
+  $('#reader').innerHTML = `<div class="multi">
+    <div class="multi-n">${n}</div><p>개의 대화를 선택했습니다</p>
+    <div class="multi-acts">
+      ${state.folder.label === 'INBOX' ? '<button class="btn-ghost" data-bulk="archive">🗄 보관</button>' : ''}
+      <button class="btn-ghost" data-bulk="${trash ? 'untrash' : 'trash'}">${trash ? '♻ 복원' : '🗑 삭제'}</button>
+      <button class="btn-ghost" data-bulk="read">읽음으로</button>
+      <button class="btn-ghost" data-bulk="unread">읽지 않음으로</button>
+      <button class="btn-ghost" data-bulk="star">★ 별표</button>
+      <button class="btn-ghost" data-bulk="clear">선택 해제</button>
+    </div>
+    <p class="multi-tip">Ctrl+클릭: 하나씩 더하기·빼기 · Shift+클릭: 범위 선택 · Ctrl+A: 모두 · 오른쪽 클릭: 메뉴</p>
+  </div>`;
+}
+
 function renderReader() {
+  if (state.checked.size > 1) { renderMulti(); return; }
   const th = state.thread;
   setReadButtons();
   $('#reader').hidden = !th;
@@ -322,38 +438,38 @@ function renderReader() {
         <div class="m-who">
           <div class="m-from">${esc(fa.name || fa.email)}${fa.name ? `<small>&lt;${esc(fa.email)}&gt;</small>` : ''}</div>
           <div class="m-to" title="${esc(toLine)}">${esc(toLine)}</div>
-          <div class="m-snip">${esc(m.snippet)}</div>
+          <div class="m-snip">${files.length ? '📎 ' : ''}${esc(m.snippet)}</div>
         </div>
         <div class="m-date">${longDate(m.date)}</div>
         <div class="m-quick"><button data-mact="reply" title="이 메일에 답장">↩</button><button data-mact="more" title="더 보기">⋯</button></div>
       </div>
       <div class="m-body">
+        ${files.length ? `<div class="atts atts-top">${files.map((x) => attChip(m, x)).join('')}${files.length > 1 ? `<button class="btn-ghost btn-sm att-all" data-attall title="모든 첨부를 고른 폴더에 저장">⬇ 모두 받기 (${files.length})</button>` : ''}</div>` : ''}
         <div class="m-imgnote"></div>
         <iframe class="m-frame" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" title="메일 본문"></iframe>
-        ${files.length ? `<div class="atts">${files.map((x) => attChip(m, x)).join('')}</div>` : ''}
       </div>
     </article>`;
   });
-  h += `<div class="r-reply"><button class="btn-ghost" data-act="reply">↩ 답장</button><button class="btn-ghost" data-act="replyAll">⤶ 전체 답장</button><button class="btn-ghost" data-act="forward">↪ 전달</button></div>`;
+  const split = (k, label) => `<span class="split"><button class="btn-ghost" data-act="${k}">${label}</button><button class="btn-ghost sp-pop" data-popact="${k}" title="새 창에서 쓰기 (메일을 보면서 작성)">↗</button></span>`;
+  h += `<div class="r-reply">${split('reply', '↩ 답장')}${split('replyAll', '⤶ 전체 답장')}${split('forward', '↪ 전달')}</div>`;
   $('#reader').innerHTML = h;
   $$('#reader .msg').forEach((el) => { if (!el.classList.contains('collapsed')) fillBody(el); });
 }
 
 function attChip(m, x) {
   const idx = m.attachments.indexOf(x);
-  return `<button class="att" data-att="${idx}" title="${esc(x.filename)} — 눌러서 열기·받기"><span class="a-ic">${fileIcon(x.mimeType, x.filename)}</span><span class="a-nm">${esc(x.filename)}</span><span class="a-sz">${sizeText(x.size)}</span></button>`;
+  return `<button class="att" data-att="${idx}" title="${esc(x.filename)} — 누르면 바로 열기·다운로드 선택, 두 번 누르면 바로 열기"><span class="a-ic">${fileIcon(x.mimeType, x.filename)}</span><span class="a-nm">${esc(x.filename)}</span><span class="a-sz">${sizeText(x.size)}</span><span class="a-dd">▾</span></button>`;
 }
 
-const PALETTE = ['#5b7fbf', '#3f9b7a', '#c0703a', '#8f5fbf', '#bf5b7f', '#4d9bb3', '#9a8a3a', '#6b7a8f'];
-function colorOf(s) { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; }
-
-const FRAME_CSS = `body{margin:0;padding:8px 12px 10px;font-family:'Pretendard Variable',Pretendard,'Malgun Gothic','Apple SD Gothic Neo',sans-serif;font-size:14.5px;line-height:1.6;color:#16202b;word-break:break-word;overflow-wrap:anywhere;overflow-x:auto}
+// 서식 없는 메일은 쓰기 화면과 같은 글꼴(맑은 고딕 14.5px)로 표시
+const MAIL_FONT = "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo',sans-serif";
+const FRAME_CSS = `body{margin:0;padding:8px 12px 10px;font-family:${MAIL_FONT};font-size:14.5px;line-height:1.6;color:#16202b;word-break:break-word;overflow-wrap:anywhere;overflow-x:auto}
 img{max-width:100%;height:auto}table{max-width:100%}pre{white-space:pre-wrap}
 blockquote{margin:0 0 0 .8ex;border-left:2px solid #c9d1db;padding-left:1ex;color:#4a5560}
 a{color:#1a56c4}.ybm-quote-toggle{display:inline-block;margin:6px 0;padding:0 8px;border:1px solid #ccd3dc;border-radius:8px;background:#eef1f5;color:#5a6774;font-size:13px;cursor:pointer;line-height:18px}`;
 
 /** 메일 본문 HTML 정리: 스크립트·외부 실행 요소 제거, 외부 그림 처리 */
-function cleanHtml(m, showImages) {
+function cleanHtml(m, showImages, { foldQuote = true } = {}) {
   const src = m.html || `<div style="white-space:normal">${textToHtml(m.text || '')}</div>`;
   const d = new DOMParser().parseFromString(src, 'text/html');
   d.querySelectorAll('script,iframe,object,embed,frame,frameset,meta[http-equiv],link:not([rel~="stylesheet"]),base').forEach((n) => n.remove());
@@ -362,16 +478,14 @@ function cleanHtml(m, showImages) {
   if (!showImages) {
     d.querySelectorAll('img[src^="http"], img[srcset]').forEach((img) => { img.dataset.src = img.getAttribute('src') || ''; img.removeAttribute('src'); img.removeAttribute('srcset'); blocked++; });
   }
-  // 이전 메일 인용(Gmail·Outlook 형식) 접기
-  const q = d.querySelector('.gmail_quote, #divRplyFwdMsg, #appendonsend, blockquote[type="cite"]');
-  if (q && q.parentNode && (m.html ? true : false)) {
+  const q = foldQuote && m.html ? d.querySelector('.gmail_quote, #divRplyFwdMsg, #appendonsend, blockquote[type="cite"]') : null;
+  if (q && q.parentNode) {
     const wrap = d.createElement('details');
     const sum = d.createElement('summary');
     sum.className = 'ybm-quote-toggle';
     sum.textContent = '⋯ 이전 내용';
     wrap.append(sum);
-    let n = q.id === 'appendonsend' || q.id === 'divRplyFwdMsg' ? q : q;
-    n.parentNode.insertBefore(wrap, n);
+    q.parentNode.insertBefore(wrap, q);
     while (wrap.nextSibling) wrap.append(wrap.nextSibling);
   }
   const styles = [...d.querySelectorAll('style, link[rel~="stylesheet"]')].map((s) => s.outerHTML).join('');
@@ -384,7 +498,7 @@ async function inlineCid(m, html) {
   const cids = m.attachments.filter((x) => x.contentId && html.includes(`cid:${x.contentId}`));
   for (const x of cids) {
     try {
-      const data = x.data || await gm.getAttachment(m.account, m.id, x.attachmentId);
+      const data = x.data || await gm.getAttachment(m.account, m.id, x.attachmentId, { name: x.filename, size: x.size });
       x.data = data;
       const b64 = data.replace(/-/g, '+').replace(/_/g, '/');
       html = html.split(`cid:${x.contentId}`).join(`data:${x.mimeType};base64,${b64}`);
@@ -424,17 +538,23 @@ async function fillBody(el, showImages = state.showImages) {
   };
 }
 
-async function openThread(key, { fromList = true } = {}) {
+async function openThread(key, { scroll = false } = {}) {
   const t = state.items.find((x) => x.key === key);
   if (!t) return;
   state.sel = key;
-  $$('#list .item').forEach((li) => li.classList.toggle('active', li.dataset.key === key));
-  $('#app').dataset.view = 'read';
-  state.thread = null;
-  setReadButtons();
-  $('#reader').hidden = false;
-  $('#empty-read').hidden = true;
-  $('#reader').innerHTML = '<div class="empty">불러오는 중…</div>';
+  if (!state.checked.has(key) || state.checked.size > 1) { state.checked = new Set([key]); }
+  state.anchor = key;
+  $$('#list .item').forEach((li) => { li.classList.toggle('active', li.dataset.key === key); li.classList.toggle('sel', state.checked.has(li.dataset.key)); });
+  if (scroll) $('#list .item.active')?.scrollIntoView({ block: 'nearest' });
+  if (!cp.open || cp.float) $('#app').dataset.view = 'read';
+  const cachedFirst = await gm.hasFull(t.account, t.id);
+  if (!cachedFirst) {
+    state.thread = null;
+    setReadButtons();
+    $('#reader').hidden = false;
+    $('#empty-read').hidden = true;
+    $('#reader').innerHTML = '<div class="empty">불러오는 중…</div>';
+  }
   try {
     const th = await gm.getThread(t.account, t.id);
     if (state.sel !== key) return;
@@ -442,97 +562,196 @@ async function openThread(key, { fromList = true } = {}) {
     th.messages.forEach((m) => { learn(m.from, 1); if (isMine(m.from)) { learn(m.to, 2); learn(m.cc, 1); } });
     renderReader();
     $('#read-wrap').scrollTop = 0;
-    if (t.unread) {
-      t.unread = false;
-      state.unread[t.account] = Math.max(0, (state.unread[t.account] || 1) - 1);
-      renderList(); renderSide();
-      gm.modifyThread(t.account, t.id, [], ['UNREAD']).catch((e) => fail(e, 'read'));
-    }
+    if (t.unread) actOn('read', [t], { quiet: true });
+    queueNear(key);
   } catch (e) {
     fail(e, 'thread');
     if (state.sel === key) $('#reader').innerHTML = `<div class="empty">메일을 불러오지 못했습니다.<br>${esc(e.message || '')}</div>`;
   }
-  if (!fromList) $$('#list .item.active')[0]?.scrollIntoView({ block: 'nearest' });
 }
 
-/* ───────── 보관·삭제·읽음·별표 ───────── */
-async function act(kind, t = current()) {
-  if (!t) return;
-  const label = state.folder.label;
-  const removeFromList = (kind === 'archive' && label === 'INBOX') || kind === 'trash' || (kind === 'star' && label === 'STARRED' && t.starred);
-  const idx = state.items.indexOf(t);
-  const restore = () => { if (!state.items.includes(t)) { state.items.splice(Math.min(idx, state.items.length), 0, t); renderList(); } };
-  try {
-    if (kind === 'archive') {
-      if (removeFromList) dropItem(t);
-      if (t.unread) { state.unread[t.account] = Math.max(0, (state.unread[t.account] || 1) - 1); renderSide(); }
-      await gm.modifyThread(t.account, t.id, [], ['INBOX']);
-      toast('보관했습니다.', 5000, { label: '되돌리기', run: async () => { await gm.modifyThread(t.account, t.id, ['INBOX'], []); restore(); refreshCounts(); } });
-    } else if (kind === 'trash') {
-      dropItem(t);
-      if (label === 'TRASH') {
-        await gm.untrashThread(t.account, t.id);
-        toast('휴지통에서 복원했습니다.');
-      } else {
-        if (t.unread && label === 'INBOX') { state.unread[t.account] = Math.max(0, (state.unread[t.account] || 1) - 1); renderSide(); }
-        await gm.trashThread(t.account, t.id);
-        toast('휴지통으로 옮겼습니다.', 5000, { label: '되돌리기', run: async () => { await gm.untrashThread(t.account, t.id); restore(); refreshCounts(); } });
-      }
-    } else if (kind === 'unread') {
-      t.unread = !t.unread;
-      if (label === 'INBOX' || t.labelIds.includes('INBOX')) { state.unread[t.account] = Math.max(0, (state.unread[t.account] || 0) + (t.unread ? 1 : -1)); renderSide(); }
-      renderList();
-      await gm.modifyThread(t.account, t.id, t.unread ? ['UNREAD'] : [], t.unread ? [] : ['UNREAD']);
-      if (t.unread && state.sel === t.key) { closeReader(); }
-    } else if (kind === 'star') {
-      t.starred = !t.starred;
-      if (removeFromList) dropItem(t); else renderList();
-      setReadButtons();
-      await gm.modifyThread(t.account, t.id, t.starred ? ['STARRED'] : [], t.starred ? [] : ['STARRED']);
-    }
-  } catch (e) { fail(e, kind); restore(); }
+/* ───────── 보관·삭제·읽음·별표 (하나·여러 개 공통) ───────── */
+const LABEL_OPS = {
+  read: [[], ['UNREAD']], unread: [['UNREAD'], []],
+  star: [['STARRED'], []], unstar: [[], ['STARRED']],
+  archive: [[], ['INBOX']], spam: [['SPAM'], ['INBOX']], notspam: [['INBOX'], ['SPAM']],
+};
+const REVERSE = { archive: 'unarchive', trash: 'untrash', untrash: 'trash', spam: 'notspam', notspam: 'spam', read: 'unread', unread: 'read', star: 'unstar', unstar: 'star' };
+LABEL_OPS.unarchive = [['INBOX'], []];
+
+function leavesFolder(kind, t) {
+  const L = state.folder.label;
+  if (kind === 'trash') return L !== 'TRASH';
+  if (kind === 'untrash') return L === 'TRASH';
+  if (kind === 'archive') return L === 'INBOX';
+  if (kind === 'spam') return L !== 'SPAM';
+  if (kind === 'notspam') return L === 'SPAM';
+  if (kind === 'unstar') return L === 'STARRED';
+  if (kind === 'unread' || kind === 'read') return state.unreadOnly && kind === 'read';
+  if (kind.startsWith('label:')) return false;
+  return false;
 }
-function dropItem(t) {
-  const i = state.items.indexOf(t);
-  if (i < 0) return;
-  state.items.splice(i, 1);
-  if (state.sel === t.key) {
-    const next = state.items[i] || state.items[i - 1];
-    if (next && window.innerWidth > 860) { renderList(); openThread(next.key); return; }
-    closeReader();
+
+async function actOn(kind, items, { quiet = false, undo = true } = {}) {
+  items = items.filter(Boolean);
+  if (!items.length) return;
+  const snapshot = items.map((t) => ({ t, idx: state.items.indexOf(t), unread: t.unread, starred: t.starred, labels: [...t.labelIds] }));
+  // 화면 먼저 바꾸기
+  for (const t of items) {
+    if (kind === 'read' || kind === 'unread') {
+      if (t.unread !== (kind === 'unread') && t.labelIds.includes('INBOX')) state.unread[t.account] = Math.max(0, (state.unread[t.account] || 0) + (kind === 'unread' ? 1 : -1));
+      t.unread = kind === 'unread';
+    }
+    if (kind === 'star' || kind === 'unstar') t.starred = kind === 'star';
+    if ((kind === 'archive' || kind === 'trash' || kind === 'spam') && t.unread && t.labelIds.includes('INBOX')) state.unread[t.account] = Math.max(0, (state.unread[t.account] || 1) - 1);
+    if (kind === 'archive') t.labelIds = t.labelIds.filter((l) => l !== 'INBOX');
+    if (kind.startsWith('label:') && !t.labelIds.includes(kind.slice(6))) t.labelIds.push(kind.slice(6));
+  }
+  const leaving = items.filter((t) => leavesFolder(kind, t));
+  if (leaving.length) dropItems(leaving);
+  else { renderList(); if (state.sel && items.some((t) => t.key === state.sel)) setReadButtons(); }
+  renderSide();
+  // 서버 반영 (계정별)
+  const byAcc = new Map();
+  for (const t of items) { if (!byAcc.has(t.account)) byAcc.set(t.account, []); byAcc.get(t.account).push(t.id); }
+  try {
+    for (const [email, ids] of byAcc) {
+      if (kind === 'trash') await gm.trashMany(email, ids);
+      else if (kind === 'untrash') await gm.untrashMany(email, ids);
+      else if (kind.startsWith('label:')) await gm.modifyMany(email, ids, [kind.slice(6)], []);
+      else { const [add, rem] = LABEL_OPS[kind]; await gm.modifyMany(email, ids, add, rem); }
+    }
+    if (quiet) return;
+    const n = items.length > 1 ? `${items.length}개 대화를 ` : '';
+    const msg = { archive: `${n}보관했습니다.`, trash: `${n}휴지통으로 옮겼습니다.`, untrash: `${n}복원했습니다.`, spam: `${n}스팸으로 신고했습니다.`, notspam: `${n}받은편지함으로 옮겼습니다.` }[kind]
+      || (kind.startsWith('label:') ? `${n}라벨을 붙였습니다.` : null);
+    if (msg) toast(msg, 6000, undo && REVERSE[kind] ? { label: '되돌리기', run: () => undoAct(kind, snapshot) } : null);
+  } catch (e) {
+    fail(e, kind);
+    restoreItems(snapshot);
+  }
+}
+async function undoAct(kind, snapshot) {
+  restoreItems(snapshot);
+  const byAcc = new Map();
+  for (const { t } of snapshot) { if (!byAcc.has(t.account)) byAcc.set(t.account, []); byAcc.get(t.account).push(t.id); }
+  try {
+    for (const [email, ids] of byAcc) {
+      const r = REVERSE[kind];
+      if (r === 'untrash') await gm.untrashMany(email, ids);
+      else if (r === 'trash') await gm.trashMany(email, ids);
+      else { const [add, rem] = LABEL_OPS[r]; await gm.modifyMany(email, ids, add, rem); }
+    }
+    toast('되돌렸습니다.');
+    refreshCounts();
+  } catch (e) { fail(e, 'undo'); }
+}
+function restoreItems(snapshot) {
+  for (const s of snapshot.sort((a, b) => a.idx - b.idx)) {
+    Object.assign(s.t, { unread: s.unread, starred: s.starred, labelIds: s.labels });
+    if (!state.items.includes(s.t)) state.items.splice(Math.max(0, Math.min(s.idx, state.items.length)), 0, s.t);
   }
   renderList();
+}
+function dropItems(list) {
+  const keys = new Set(list.map((t) => t.key));
+  const firstIdx = state.items.findIndex((t) => keys.has(t.key));
+  state.items = state.items.filter((t) => !keys.has(t.key));
+  for (const k of keys) state.checked.delete(k);
+  if (state.sel && keys.has(state.sel)) {
+    const next = state.items[firstIdx] || state.items[firstIdx - 1];
+    state.sel = null; state.thread = null;
+    if (next && innerWidth > 860 && list.length === 1) { renderList(); openThread(next.key); return; }
+    if (innerWidth <= 860) $('#app').dataset.view = 'list';
+  }
+  renderList();
+  renderReader();
 }
 function closeReader() {
   state.sel = null;
   state.thread = null;
+  state.checked.clear();
   $('#app').dataset.view = 'list';
   renderReader();
   renderList();
 }
+const targets = () => (state.checked.size ? checkedItems() : [current()].filter(Boolean));
 
-/* ───────── 첨부파일 열기·받기 ───────── */
-async function openAttachment(m, x) {
-  const viewable = /^image\/|pdf|^text\/plain/.test(x.mimeType);
-  const win = viewable ? window.open('', '_blank') : null;
+/* ───────── 첨부파일: 바로 열기 · 다운로드(위치 지정) ───────── */
+async function attBlob(m, x) {
+  const data = x.data || await gm.getAttachment(m.account, m.id, x.attachmentId, { name: x.filename, size: x.size });
+  return new Blob([b64ToBytes(data)], { type: x.mimeType || 'application/octet-stream' });
+}
+const viewable = (x) => /^image\/|pdf|^text\/plain/.test(x.mimeType) || /\.pdf$/i.test(x.filename);
+function saveToDownloads(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+/** 바로 열기: 다운로드 폴더에 저장 + (PDF·그림은) 새 탭에서 열기 */
+async function attOpen(m, x) {
+  const win = viewable(x) ? window.open('', '_blank') : null;
   try {
     toast(`'${x.filename}' 받는 중…`, 0);
-    const data = x.data || await gm.getAttachment(m.account, m.id, x.attachmentId);
-    const blob = new Blob([b64ToBytes(data)], { type: x.mimeType });
-    const url = URL.createObjectURL(blob);
-    if (win) win.location.href = url;
-    else {
-      const a = document.createElement('a');
-      a.href = url; a.download = x.filename;
-      document.body.append(a); a.click(); a.remove();
-    }
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    $('#toast').hidden = true;
+    const blob = await attBlob(m, x);
+    saveToDownloads(blob, x.filename);
+    if (win) { const u = URL.createObjectURL(blob); win.location.href = u; setTimeout(() => URL.revokeObjectURL(u), 120_000); }
+    toast(viewable(x) ? `다운로드 폴더에 저장하고 새 탭에서 열었습니다.` : `다운로드 폴더에 저장했습니다. 브라우저 아래(또는 위)의 다운로드 표시를 눌러 여세요.`, 5000);
   } catch (e) { win?.close(); fail(e, 'att'); }
 }
+/** 다운로드: 저장할 위치·이름 고르기 */
+async function attSaveAs(m, x) {
+  if (!window.showSaveFilePicker) { toast('이 브라우저는 저장 위치 선택을 지원하지 않아 다운로드 폴더에 저장합니다.'); attBlob(m, x).then((b) => saveToDownloads(b, x.filename)).catch((e) => fail(e, 'att')); return; }
+  let handle;
+  try { handle = await window.showSaveFilePicker({ suggestedName: x.filename, id: 'ybm-att', startIn: 'downloads' }); }
+  catch (e) { if (e.name !== 'AbortError') fail(e, 'saveAs'); return; }
+  try {
+    toast(`'${x.filename}' 저장 중…`, 0);
+    const blob = await attBlob(m, x);
+    const w = await handle.createWritable();
+    await w.write(blob); await w.close();
+    toast(`저장했습니다: ${handle.name}`);
+  } catch (e) { fail(e, 'saveAs'); }
+}
+/** 모두 받기: 폴더 고르기 → 첨부 전부 저장 */
+async function attSaveAll(m) {
+  const files = m.attachments.filter((x) => !x.inline || !(m.html || '').includes(`cid:${x.contentId}`));
+  if (!window.showDirectoryPicker) {
+    for (const x of files) { const b = await attBlob(m, x); saveToDownloads(b, x.filename); }
+    toast(`${files.length}개 파일을 다운로드 폴더에 저장했습니다.`);
+    return;
+  }
+  let dir;
+  try { dir = await window.showDirectoryPicker({ id: 'ybm-att', mode: 'readwrite', startIn: 'downloads' }); }
+  catch (e) { if (e.name !== 'AbortError') fail(e, 'dir'); return; }
+  try {
+    let i = 0;
+    for (const x of files) {
+      toast(`저장 중… ${++i}/${files.length}`, 0);
+      const fh = await dir.getFileHandle(x.filename.replace(/[\\/:*?"<>|]/g, '_'), { create: true });
+      const w = await fh.createWritable();
+      await w.write(await attBlob(m, x)); await w.close();
+    }
+    toast(`${files.length}개 파일을 '${dir.name}' 폴더에 저장했습니다.`);
+  } catch (e) { fail(e, 'saveAll'); }
+}
+function attMenu(at, m, x) {
+  const files = m.attachments.filter((y) => !y.inline || !(m.html || '').includes(`cid:${y.contentId}`));
+  showPop(at, `<div class="pop-h">${esc(x.filename)} · ${sizeText(x.size)}</div>
+    ${mi('open', '바로 열기', { icon: '▶', hint: '다운로드 폴더' })}
+    ${mi('save', '다운로드…', { icon: '⬇', hint: '위치 지정' })}
+    ${files.length > 1 ? '<hr>' + mi('all', `첨부 모두 받기 (${files.length}개)…`, { icon: '🗂' }) : ''}`, (k) => {
+    if (k === 'open') attOpen(m, x);
+    if (k === 'save') attSaveAs(m, x);
+    if (k === 'all') attSaveAll(m);
+  });
+}
 
-/* ───────── 메일 쓰기 ───────── */
-const cp = { open: false, mode: 'new', account: null, threadId: null, inReplyTo: '', references: '', quoteHtml: '', quoteText: '', files: [], origAtts: [], dirty: false };
+/* ───────── 메일 쓰기 (읽기 영역 전체 사용) ───────── */
+const cp = { open: false, float: pref.get('cpFloat', false), mode: 'new', account: null, threadId: null, inReplyTo: '', references: '', quoteHtml: '', quoteText: '', files: [], origAtts: [], dirty: false, prevView: 'list' };
+let edMain = null, edSig = null;
 
 function fromOptions(sel) {
   return accs().map((a) => `<option value="${esc(a.email)}"${a.email === sel ? ' selected' : ''}>${esc(a.name ? `${a.name} <${a.email}>` : a.email)}${auth.token(a.email) ? '' : ' (연결 필요)'}</option>`).join('');
@@ -541,15 +760,13 @@ const prefix = (p, s) => (new RegExp(`^\\s*(${p}|${p === 'Re' ? '회신|답장|R
 const withoutMe = (list, me) => parseAddrList(list).filter((x) => x.email.toLowerCase() !== me && !accs().some((a) => a.email === x.email.toLowerCase()));
 const joinAddr = (arr) => arr.map((x) => (x.name ? `${x.name} <${x.email}>` : x.email)).join(', ');
 
-function quoteParts(m, fwd) {
-  const body = m.html ? cleanHtml(m, true).html : textToHtml(m.text || '');
+async function quoteParts(m, fwd) {
+  let body = m.html ? cleanHtml(m, true, { foldQuote: false }).html : textToHtml(m.text || '');
+  body = await inlineCid(m, body);
   const text = m.text || htmlToText(m.html || '');
   if (fwd) {
     const head = `---------- 전달된 메일 ----------\n보낸 사람: ${m.from}\n날짜: ${longDate(m.date)}\n제목: ${m.subject}\n받는 사람: ${m.to}${m.cc ? `\n참조: ${m.cc}` : ''}\n`;
-    return {
-      html: `<div class="gmail_quote"><div>${textToHtml(head)}</div><br>${body}</div>`,
-      text: `${head}\n${text}`,
-    };
+    return { html: `<div class="gmail_quote"><div>${textToHtml(head)}</div><br>${body}</div>`, text: `${head}\n${text}` };
   }
   const line = `${longDate(m.date)}, ${m.from} 님이 작성:`;
   return {
@@ -558,16 +775,29 @@ function quoteParts(m, fwd) {
   };
 }
 
-function openCompose({ mode = 'new', msg = null, account, to = '', subject = '', body = '' } = {}) {
+function setCpFloat(f) {
+  cp.float = f;
+  pref.set('cpFloat', f);
+  const c = $('#compose');
+  c.classList.toggle('float', f);
+  c.classList.remove('min');
+  // 떠 있는 창은 화면 전체 기준, 꽉 찬 창은 읽기 영역 안
+  if (f || CPWIN) document.body.append(c); else $('.pane-read').append(c);
+  $('#cp-float').textContent = f ? '⤢' : '⧉';
+  $('#cp-float').title = f ? '읽기 영역 전체로 크게' : '작은 창으로 띄우기';
+  $('#cp-min').hidden = !f;
+}
+
+async function openCompose({ mode = 'new', msg = null, account, to = '', subject = '', body = '', snapshot = null } = {}) {
   if (cp.open && cp.dirty && !confirm('작성 중인 메일이 있습니다. 버리고 새로 쓸까요?')) { $('#compose').classList.remove('min'); return; }
   const th = state.thread;
   const m = msg || (th && mode !== 'new' ? th.messages[th.messages.length - 1] : null);
   const scopeAcc = state.folder.scope !== 'all' ? state.folder.scope : null;
-  const from = account || m?.account || th?.account || scopeAcc || connected()[0]?.email || accs()[0]?.email;
+  const from = snapshot?.from || account || m?.account || th?.account || scopeAcc || connected()[0]?.email || accs()[0]?.email;
   if (!from) { toast('먼저 계정을 추가하세요.'); return; }
   Object.assign(cp, { open: true, mode, account: from, threadId: null, inReplyTo: '', references: '', quoteHtml: '', quoteText: '', files: [], origAtts: [], dirty: false });
   let cc = '';
-  if (m && mode !== 'new') {
+  if (m && mode !== 'new' && !snapshot) {
     const me = from;
     const mine = isMine(m.from);
     if (mode === 'reply') to = mine ? m.to : (m.replyTo || m.from);
@@ -580,8 +810,6 @@ function openCompose({ mode = 'new', msg = null, account, to = '', subject = '',
       cc = joinAddr(withoutMe(m.cc, me).filter((x) => !seen.has(x.email.toLowerCase())));
     }
     subject = mode === 'forward' ? prefix('Fwd', m.subject || '') : prefix('Re', m.subject || '');
-    const q = quoteParts(m, mode === 'forward');
-    cp.quoteHtml = q.html; cp.quoteText = q.text;
     if (mode !== 'forward') {
       cp.threadId = m.threadId;
       cp.inReplyTo = m.messageId;
@@ -590,31 +818,78 @@ function openCompose({ mode = 'new', msg = null, account, to = '', subject = '',
       cp.origAtts = m.attachments.filter((x) => !x.inline).map((x) => ({ ...x, msgId: m.id, account: m.account, keep: true }));
     }
   }
-  const sig = acc(from).signature;
-  $('#cp-title').textContent = { new: '새 메일', reply: '답장', replyAll: '전체 답장', forward: '전달' }[mode];
+  if (snapshot) Object.assign(cp, { account: snapshot.account || from, mode: snapshot.mode, threadId: snapshot.threadId, inReplyTo: snapshot.inReplyTo, references: snapshot.references, quoteHtml: snapshot.quoteHtml, quoteText: snapshot.quoteText, files: snapshot.files, origAtts: snapshot.origAtts });
+  setCpFloat(cp.float);
+  $('#cp-title').textContent = { new: '새 메일', reply: '답장', replyAll: '전체 답장', forward: '전달' }[cp.mode];
   $('#cp-from').innerHTML = fromOptions(from);
-  $('#cp-to').value = to;
-  $('#cp-cc').value = cc;
-  $('#cp-bcc').value = '';
-  $$('#compose [data-cc]').forEach((r) => (r.hidden = !cc));
-  $('#cp-subject').value = subject;
-  $('#cp-text').value = (body ? body + '\n' : '') + '\n' + (sig ? `\n${sig}\n` : '');
-  $('#cp-quote').hidden = !cp.quoteHtml;
-  $('#cp-quote').open = false;
-  $('#cp-quote-view').innerHTML = cp.quoteHtml ? esc(cp.quoteText).replace(/\n/g, '<br>') : '';
+  $('#cp-to').value = snapshot?.to ?? to;
+  $('#cp-cc').value = snapshot?.cc ?? cc;
+  $('#cp-bcc').value = snapshot?.bcc ?? '';
+  $$('#compose [data-cc]').forEach((r) => (r.hidden = !$('#cp-cc').value && !$('#cp-bcc').value));
+  $('#cp-subject').value = snapshot?.subject ?? subject;
+  $('#cp-editor').innerHTML = snapshot?.html ?? `<div>${body ? textToHtml(body) : '<br>'}</div><div><br></div>`;
+  $('#cp-sig').innerHTML = snapshot?.sig ?? sigHtml(acc(from));
+  syncSigBox();
+  $('#cp-quote').hidden = true;
   $('#cp-msg').textContent = ''; $('#cp-msg').className = 'cp-msg';
   renderCpAtts();
+  cp.prevView = $('#app').dataset.view;
+  if (!cp.float) $('#app').dataset.view = 'read';
   $('#compose').hidden = false;
   $('#compose').classList.remove('min');
-  const focusEl = to ? $('#cp-text') : $('#cp-to');
+  const focusEl = $('#cp-to').value ? $('#cp-editor') : $('#cp-to');
   focusEl.focus();
-  if (focusEl === $('#cp-text')) $('#cp-text').setSelectionRange(0, 0);
+  if (focusEl === $('#cp-editor')) { const r = document.createRange(); r.setStart($('#cp-editor'), 0); r.collapse(true); getSelection().removeAllRanges(); getSelection().addRange(r); }
+  if (snapshot) cp.dirty = true;
+  // 원문 인용 (본문 속 그림 포함) — 늦게 채워짐
+  cp.quotePending = null;
+  if (cp.quoteHtml) showQuote();
+  else if (m && mode !== 'new' && !snapshot) {
+    cp.quotePending = (async () => {
+      const q = await quoteParts(m, mode === 'forward');
+      if (!cp.open) return;
+      cp.quoteHtml = q.html; cp.quoteText = q.text;
+      showQuote();
+    })();
+    await cp.quotePending;
+  }
 }
 
+/* ───────── 별도 창에서 쓰기 (메일을 보면서 작성) ───────── */
+const drafts = new Map();
+window.__ybmTakeDraft = (id) => { const d = drafts.get(id); drafts.delete(id); return d; };
+window.__ybmQueueSend = (job) => queueSend(job);
+/** 지금 쓰는 메일을 새 창으로 떼어 냄 — 클릭 즉시 창을 열어야 팝업 차단을 피함 */
+async function popOut(prepare) {
+  const id = Math.random().toString(36).slice(2, 10);
+  const w = window.open('', `ybm-cp-${id}`, 'popup=yes,width=860,height=900');
+  if (!w) { toast('팝업이 차단되었습니다. 주소창 오른쪽에서 팝업을 허용해 주세요.', 6000); return; }
+  try { w.document.title = '메일 쓰기 – YB-Mail'; w.document.body.innerHTML = '<p style="font-family:sans-serif;color:#888;padding:20px">여는 중…</p>'; } catch { /* 무시 */ }
+  if (prepare) await prepare();
+  if (cp.quotePending) await cp.quotePending;
+  drafts.set(id, snapshotCompose());
+  cp.dirty = false;
+  closeCompose(true);
+  w.location.href = `${location.pathname}?cpwin=${id}${DEMO ? '&demo' : ''}`;
+}
+function showQuote() {
+  $('#cp-quote').hidden = false;
+  $('#cp-quote').open = false;
+  // 원문 서식(style)이 앱 화면에 번지지 않도록 별도 틀 안에 표시
+  const f = document.createElement('iframe');
+  f.className = 'm-frame';
+  f.setAttribute('sandbox', 'allow-same-origin');
+  f.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><style>${FRAME_CSS}</style></head><body>${cp.quoteHtml}</body></html>`;
+  f.onload = () => { const d = f.contentDocument; if (d) f.style.height = Math.max(60, d.documentElement.scrollHeight + 4) + 'px'; };
+  $('#cp-quote-view').replaceChildren(f);
+}
+function syncSigBox() { $('#cp-sigwrap').classList.toggle('empty', !$('#cp-sig').textContent.trim() && !$('#cp-sig img')); }
+
 function renderCpAtts() {
-  const all = [...cp.origAtts.filter((x) => x.keep).map((x, i) => ({ name: x.filename, size: x.size, type: x.mimeType, k: `o${cp.origAtts.indexOf(x)}` })),
+  const all = [...cp.origAtts.map((x, i) => (x.keep ? { name: x.filename, size: x.size, type: x.mimeType, k: `o${i}` } : null)).filter(Boolean),
     ...cp.files.map((f, i) => ({ name: f.name, size: f.size, type: f.type, k: `f${i}` }))];
   $('#cp-atts').innerHTML = all.map((x) => `<span class="att"><span class="a-ic">${fileIcon(x.type, x.name)}</span><span class="a-nm">${esc(x.name)}</span><span class="a-sz">${sizeText(x.size)}</span><button class="a-x" data-rm="${x.k}" title="빼기" aria-label="빼기">✕</button></span>`).join('');
+  $('#cp-atts').hidden = !all.length;
 }
 function addFiles(list) {
   for (const f of list) cp.files.push(f);
@@ -625,8 +900,21 @@ function addFiles(list) {
 function closeCompose(force = false) {
   if (!force && cp.dirty && !confirm('작성 중인 메일을 버릴까요?')) return;
   cp.open = false;
+  if (CPWIN) { cp.dirty = false; window.close(); return; }
   $('#compose').hidden = true;
   $('#suggest').hidden = true;
+  edMain?.hide(); edSig?.hide();
+  if (!cp.float && innerWidth <= 860) $('#app').dataset.view = state.thread ? 'read' : cp.prevView || 'list';
+}
+
+function snapshotCompose() {
+  return {
+    account: cp.account,
+    from: $('#cp-from').value, to: $('#cp-to').value, cc: $('#cp-cc').value, bcc: $('#cp-bcc').value, subject: $('#cp-subject').value,
+    html: $('#cp-editor').innerHTML, sig: $('#cp-sig').innerHTML,
+    mode: cp.mode, threadId: cp.threadId, inReplyTo: cp.inReplyTo, references: cp.references, quoteHtml: cp.quoteHtml, quoteText: cp.quoteText,
+    files: [...cp.files], origAtts: cp.origAtts.map((x) => ({ ...x })),
+  };
 }
 
 async function sendCompose() {
@@ -641,7 +929,7 @@ async function sendCompose() {
   if (!auth.token(from)) { say(`${from} 연결이 필요합니다. 왼쪽 '연결'을 누른 뒤 다시 보내세요.`, true); return; }
   const subject = $('#cp-subject').value.trim();
   if (!subject && !confirm('제목 없이 보낼까요?')) return;
-  const text = $('#cp-text').value.replace(/\s+$/, '');
+  const snap = snapshotCompose();
   const a = acc(from);
   const btn = $('#cp-send');
   btn.disabled = true;
@@ -650,30 +938,84 @@ async function sendCompose() {
     const attachments = [];
     for (const f of cp.files) attachments.push({ name: f.name, type: f.type || 'application/octet-stream', bytes: new Uint8Array(await f.arrayBuffer()) });
     for (const x of cp.origAtts.filter((o) => o.keep)) {
-      const data = x.data || await gm.getAttachment(x.account, x.msgId, x.attachmentId);
+      const data = x.data || await gm.getAttachment(x.account, x.msgId, x.attachmentId, { name: x.filename, size: x.size });
       attachments.push({ name: x.filename, type: x.mimeType, bytes: b64ToBytes(data) });
     }
-    const total = attachments.reduce((s, f) => s + f.bytes.length, 0);
-    if (total > 24 * 1024 * 1024) { say(`첨부 합계 ${sizeText(total)} — Gmail 한도(25MB)를 넘습니다.`, true); btn.disabled = false; return; }
-    say('보내는 중…');
-    const html = `<div style="font-family:'Malgun Gothic',sans-serif;font-size:14px;line-height:1.6">${textToHtml(text)}</div>${cp.quoteHtml ? '<br>' + cp.quoteHtml : ''}`;
-    const plain = text + (cp.quoteText ? '\n\n' + cp.quoteText : '');
+    const editorHtml = $('#cp-editor').innerHTML;
+    const sig = $('#cp-sig').innerHTML.trim();
+    const sigOn = $('#cp-sig').textContent.trim() || $('#cp-sig img');
+    const STYLE = `font-family:${MAIL_FONT};font-size:14.5px;line-height:1.6;color:#222`;
+    const combined = `<div style="${STYLE}">${editorHtml}</div>` +
+      (cp.quoteHtml ? `<br>${cp.quoteHtml}` : '') +
+      (sigOn ? `<br><div class="ybm-signature" style="${STYLE}">${sig}</div>` : '');
+    const { html, inline } = extractInline(combined);
+    const total = [...attachments, ...inline].reduce((s, f) => s + f.bytes.length, 0);
+    if (total > 24 * 1024 * 1024) { say(`첨부·그림 합계 ${sizeText(total)} — Gmail 한도(25MB)를 넘습니다.`, true); btn.disabled = false; return; }
+    const plain = [htmlToText(editorHtml), cp.quoteText, sigOn ? htmlToText(sig) : ''].filter(Boolean).join('\n\n');
+    const sameThread = from === cp.account;
     const raw = buildRaw({
       from: { name: a.name, email: from }, ...fields, subject, text: plain, html,
-      inReplyTo: from === cp.account ? cp.inReplyTo : '', references: from === cp.account ? cp.references : '', attachments,
+      inReplyTo: sameThread ? cp.inReplyTo : '', references: sameThread ? cp.references : '', attachments, inline,
     });
-    await gm.sendMime(from, raw, from === cp.account ? cp.threadId : null);
     learn(fields.to, 3); learn(fields.cc, 2); learn(fields.bcc, 1);
     closeCompose(true);
-    toast(`${from} 계정으로 보냈습니다.`);
-    if (state.thread && cp.threadId && state.thread.id === cp.threadId) openThread(state.sel);
-    else if (state.folder.label === 'SENT') loadList({ silent: true });
+    queueSend({ from, raw, threadId: sameThread ? cp.threadId : null, subject: subject || '(제목 없음)', snap });
   } catch (e) {
-    if (e instanceof auth.AuthError) say(`${from} 연결이 끊겼습니다. 다시 연결한 뒤 보내기를 누르세요.`, true);
-    else say(e.message || '보내기 실패', true);
+    say(e.message || '보내기 준비 실패', true);
     fail(e, 'send');
   } finally { btn.disabled = false; }
 }
+
+/* ───────── 발송 취소 (보내기 후 최대 30초 대기) ───────── */
+const outbox = [];
+function queueSend(job) {
+  // 별도 창에서 보낸 경우: 본 창이 발송 취소 막대를 맡고 이 창은 닫음
+  if (CPWIN && window.opener && !window.opener.closed && window.opener.__ybmQueueSend) {
+    try { window.opener.__ybmQueueSend(job); cp.dirty = false; window.close(); return; } catch { /* 본 창이 없으면 여기서 처리 */ }
+  }
+  job.id = Math.random().toString(36).slice(2);
+  job.deadline = Date.now() + state.undoSec * 1000;
+  outbox.push(job);
+  if (state.undoSec <= 0) { flushSend(job); return; }
+  job.timer = setTimeout(() => flushSend(job), state.undoSec * 1000);
+  renderSendbar();
+}
+async function flushSend(job) {
+  const i = outbox.indexOf(job);
+  if (i < 0) return;
+  clearTimeout(job.timer);
+  outbox.splice(i, 1);
+  renderSendbar();
+  try {
+    await gm.sendMime(job.from, job.raw, job.threadId);
+    toast(`보냈습니다: ${job.subject}`);
+    if (state.thread && job.threadId && state.thread.id === job.threadId) { await gm.fetchFull(job.from, job.threadId, { force: true }); if (state.sel) openThread(state.sel); }
+    else if (state.folder.label === 'SENT') loadList({ silent: true });
+  } catch (e) {
+    fail(e, 'send');
+    toast(`보내지 못했습니다: ${job.subject}`, 0, { label: '다시 쓰기', run: () => openCompose({ snapshot: job.snap }) });
+  }
+}
+function cancelSend(id) {
+  const job = outbox.find((j) => j.id === id);
+  if (!job) return;
+  clearTimeout(job.timer);
+  outbox.splice(outbox.indexOf(job), 1);
+  renderSendbar();
+  openCompose({ snapshot: job.snap });
+  toast('발송을 취소했습니다. 메일을 다시 열었습니다.');
+}
+function renderSendbar() {
+  const bar = $('#sendbar');
+  bar.hidden = !outbox.length;
+  bar.innerHTML = outbox.map((j) => {
+    const left = Math.max(0, Math.ceil((j.deadline - Date.now()) / 1000));
+    const pct = Math.max(0, Math.min(100, ((j.deadline - Date.now()) / (state.undoSec * 1000)) * 100));
+    return `<button class="sb-item" data-cancel="${j.id}" title="눌러서 발송 취소"><span class="sb-t"><b>메일 발송 취소:</b> ${esc(j.subject)}</span><span class="sb-s">${left}초</span><i style="width:${pct}%"></i></button>`;
+  }).join('');
+}
+setInterval(() => { if (outbox.length) renderSendbar(); }, 500);
+window.addEventListener('beforeunload', (e) => { if (outbox.length || (cp.open && cp.dirty)) { e.preventDefault(); e.returnValue = ''; } });
 
 /* 받는 사람 자동 완성 */
 let sugTarget = null, sugIdx = 0;
@@ -728,7 +1070,7 @@ function gate(kind) {
       <p>보안을 위해 연결은 1시간마다 새로 받습니다.<br>계정마다 <b>연결</b>을 눌러 주세요(창이 잠깐 떴다 닫힙니다).</p>
       <div class="gate-accs">${accs().map((a) => `<div class="gate-acc" style="--acc:${a.color}"><span>${esc(a.email)}</span>${auth.token(a.email) ? '<b class="ok">✓ 연결됨</b>' : `<button class="btn-primary" data-reconnect="${esc(a.email)}">연결</button>`}</div>`).join('')}</div>
       <p class="gate-msg" id="gate-msg"></p>
-      <button class="btn-text" id="gate-skip">연결된 계정만으로 열기</button>`;
+      <button class="btn-text" id="gate-skip">저장된 메일만 보기 (연결 없이 열기)</button>`;
   }
 }
 function gateMsg(t) { const el = $('#gate-msg'); if (el) el.textContent = t || ''; }
@@ -736,7 +1078,6 @@ function gateMsg(t) { const el = $('#gate-msg'); if (el) el.textContent = t || '
 async function doReconnect(email) {
   try {
     await auth.reconnect(email);
-    state.authErr.delete(email);
     toast(`${email} 연결됨`);
     afterConnect();
   } catch (e) { gateMsg(e.message); toast(e.message, 6000); }
@@ -748,82 +1089,121 @@ async function doAdd() {
     afterConnect();
   } catch (e) { gateMsg(e.message); toast(e.message, 6000); }
 }
-let started = false;
+let started = false, gateSkipped = false;
 function afterConnect() {
   renderBanner();
   renderSide();
   if (!accs().length) { gate('add'); return; }
-  if (!connected().length) { gate('connect'); return; }
-  if (!$('#gate').hidden && accs().some((a) => !auth.token(a.email)) && !gateSkipped) { gate('connect'); }
+  if (!connected().length && !gateSkipped) { gate('connect'); }
+  else if (!$('#gate').hidden && accs().some((a) => !auth.token(a.email)) && !gateSkipped) gate('connect');
   else gate(null);
   if (!started) { started = true; selectFolder(state.folder.scope, state.folder.label); }
-  else { loadList({ silent: true }); }
-  refreshCounts();
+  else loadList({ silent: true });
+  if (connected().length) { refreshCounts(); setTimeout(runPrefetch, 2500); }
 }
-let gateSkipped = false;
 
-/* ───────── 메뉴·계정 설정 ───────── */
-function showPop(anchor, html, bind) {
-  const p = $('#pop');
-  p.innerHTML = html;
-  p.hidden = false;
-  const r = anchor.getBoundingClientRect();
-  const w = p.offsetWidth, hgt = p.offsetHeight;
-  p.style.left = `${Math.max(8, Math.min(r.left, innerWidth - w - 8))}px`;
-  p.style.top = r.bottom + hgt + 8 > innerHeight ? `${Math.max(8, r.top - hgt - 6)}px` : `${r.bottom + 6}px`;
-  bind?.(p);
-}
-const closePop = () => ($('#pop').hidden = true);
+/* ───────── 설정 메뉴 ───────── */
+let installEvt = null;
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvt = e; });
+window.addEventListener('appinstalled', () => { installEvt = null; toast('YB-Mail을 앱으로 설치했습니다.'); });
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone;
 
-function openMenu(anchor) {
+async function openMenu(anchor) {
+  const usage = await cache.usage();
   showPop(anchor, `
     <div class="pop-row">화면 <select id="m-theme" class="sel"><option value="system">기기 설정 따름</option><option value="light">밝게</option><option value="dark">어둡게</option></select></div>
-    <button data-m="img">${state.showImages ? '☑' : '☐'} 메일 속 외부 그림 바로 표시</button>
+    ${mi('img', `${state.showImages ? '☑' : '☐'} 메일 속 외부 그림 바로 표시`)}
     <hr>
-    <button data-m="acc">👤 계정 설정 (이름·서명·색·순서)</button>
-    <button data-m="add">＋ 계정 추가</button>
+    ${mi('sig', '서명 만들기·고치기', { icon: '✍' })}
+    ${mi('acc', '계정 설정 (이름·색·순서)', { icon: '👤' })}
+    ${mi('add', '계정 추가', { icon: '＋' })}
+    <div class="pop-row">발송 취소 대기 <select id="m-undo" class="sel"><option value="0">끄기</option><option value="5">5초</option><option value="10">10초</option><option value="20">20초</option><option value="30">30초 (최대)</option></select></div>
     <hr>
-    <button data-m="cid">🔑 클라이언트 ID 바꾸기</button>
-    <button data-m="update">⟳ 새 버전 확인 (v${VERSION})</button>`, (p) => {
-    const s = $('#m-theme', p); s.value = getTheme(); s.onchange = () => setTheme(s.value);
-    p.onclick = (e) => {
-      const b = e.target.closest('[data-m]'); if (!b) return;
-      closePop();
-      const k = b.dataset.m;
-      if (k === 'img') { state.showImages = !state.showImages; pref.set('showImages', state.showImages); if (state.thread) renderReader(); toast(state.showImages ? '외부 그림을 바로 표시합니다.' : '외부 그림을 숨깁니다(메일마다 표시 가능).'); }
-      if (k === 'acc') openAccSettings();
-      if (k === 'add') doAdd();
-      if (k === 'cid') { const v = prompt('OAuth 클라이언트 ID', auth.clientId()); if (v != null) { auth.setClientId(v); toast('저장했습니다. 계정을 다시 연결하세요.'); } }
-      if (k === 'update') navigator.serviceWorker?.getRegistration().then((r) => r?.update()).then(() => toast('확인했습니다. 새 버전이 있으면 안내가 뜹니다.'));
-    };
+    <div class="pop-row">기기 저장 <select id="m-pre" class="sel"><option value="0">미리 받지 않음</option><option value="100">계정별 최근 100통</option><option value="200">계정별 최근 200통</option><option value="500">계정별 최근 500통</option></select></div>
+    ${mi('prefetch', '지금 미리 받기', { icon: '⟳', hint: `사용 ${sizeText(usage)}` })}
+    ${mi('wipe', '이 기기 저장본 모두 지우기', { icon: '🧹', cls: 'danger' })}
+    <hr>
+    ${!isStandalone() ? mi('install', installEvt ? '앱으로 설치 (바탕화면·작업표시줄)' : '앱으로 설치하는 방법', { icon: '⬇' }) : ''}
+    ${mi('cid', '클라이언트 ID 바꾸기', { icon: '🔑' })}
+    ${mi('update', `새 버전 확인 (v${VERSION})`, { icon: '⟳' })}`, async (k) => {
+    if (k === 'img') { state.showImages = !state.showImages; pref.set('showImages', state.showImages); if (state.thread) renderReader(); toast(state.showImages ? '외부 그림을 바로 표시합니다.' : '외부 그림을 숨깁니다(메일마다 표시 가능).'); }
+    if (k === 'sig') openSigSettings();
+    if (k === 'acc') openAccSettings();
+    if (k === 'add') doAdd();
+    if (k === 'prefetch') { bg.ranOnce = false; runPrefetch(); }
+    if (k === 'wipe' && confirm('이 기기에 저장한 메일 사본을 모두 지울까요?\n(Gmail 서버의 메일은 그대로이며, 다시 미리 받습니다)')) { await cache.clearAll(); toast('기기 저장본을 지웠습니다.'); }
+    if (k === 'install') {
+      if (installEvt) { installEvt.prompt(); const r = await installEvt.userChoice; if (r.outcome !== 'accepted') toast('설치를 취소했습니다.'); installEvt = null; }
+      else toast('Chrome·Edge 주소창 오른쪽의 설치 아이콘(⊕)을 누르거나, 메뉴(⋮) → 앱 → "YB-Mail 설치"를 고르세요. 휴대폰은 "홈 화면에 추가".', 9000);
+    }
+    if (k === 'cid') { const v = prompt('OAuth 클라이언트 ID', auth.clientId()); if (v != null) { auth.setClientId(v); toast('저장했습니다. 계정을 다시 연결하세요.'); } }
+    if (k === 'update') navigator.serviceWorker?.getRegistration().then((r) => r?.update()).then(() => toast('확인했습니다. 새 버전이 있으면 안내가 뜹니다.'));
+  });
+  const p = $('#pop');
+  const s = $('#m-theme', p); s.value = getTheme(); s.onchange = () => setTheme(s.value);
+  const u = $('#m-undo', p); u.value = String(state.undoSec); u.onchange = () => { state.undoSec = Number(u.value); pref.set('undoSec', state.undoSec); };
+  const pr = $('#m-pre', p); pr.value = String(state.prefetchN); pr.onchange = () => { state.prefetchN = Number(pr.value); pref.set('prefetchN', state.prefetchN); if (state.prefetchN) { bg.ranOnce = false; runPrefetch(); } };
+}
+
+function modal(html) {
+  const wrap = document.createElement('div');
+  wrap.className = 'modal';
+  wrap.innerHTML = `<div class="modal-card">${html}</div>`;
+  document.body.append(wrap);
+  return wrap;
+}
+
+function openSigSettings() {
+  const list = accs();
+  if (!list.length) { toast('먼저 계정을 추가하세요.'); return; }
+  const w = modal(`<h3>✍ 서명</h3>
+    <p class="modal-tip">계정마다 서명을 만들면 새 메일·답장·전달의 <b>맨 아래</b>에 자동으로 들어갑니다. 로고 등 그림도 붙여넣을 수 있습니다(모서리를 잡아 크기 조절).</p>
+    ${list.map((a) => `<div class="acc-edit" style="--acc:${a.color}" data-e="${esc(a.email)}">
+      <div class="ae-h"><span class="dot" style="background:${a.color}"></span><span>${esc(a.email)}</span></div>
+      <div class="sig-ed" contenteditable="true" data-sig>${sigHtml(a)}</div>
+    </div>`).join('')}
+    <div class="modal-foot"><button class="btn-ghost" data-close>취소</button><button class="btn-primary" data-save>저장</button></div>`);
+  const eds = $$('[data-sig]', w).map((el) => setupEditor(el));
+  w.addEventListener('click', (e) => {
+    if (e.target.closest('[data-close]') || e.target === w) { eds.forEach((x) => x.hide()); w.remove(); }
+    if (e.target.closest('[data-save]')) {
+      $$('[data-e]', w).forEach((box) => {
+        const el = $('[data-sig]', box);
+        const empty = !el.textContent.trim() && !el.querySelector('img');
+        auth.updateAccount(box.dataset.e, { signatureHtml: empty ? '' : el.innerHTML, signature: '' });
+      });
+      eds.forEach((x) => x.hide());
+      w.remove();
+      toast('서명을 저장했습니다.');
+    }
   });
 }
 
 function openAccSettings() {
-  const wrap = document.createElement('div');
-  wrap.className = 'modal';
+  const w = modal('');
+  const card = $('.modal-card', w);
   const draw = () => {
     const list = accs();
-    wrap.innerHTML = `<div class="modal-card"><h3>계정 설정</h3>
+    card.innerHTML = `<h3>계정 설정</h3>
       ${list.map((a, i) => `<div class="acc-edit" style="--acc:${a.color}" data-e="${esc(a.email)}">
         <div class="ae-h"><span class="dot" style="background:${a.color}"></span><span>${esc(a.email)}</span>
           <button class="icon-btn" data-mv="-1" ${i ? '' : 'disabled'} title="위로">↑</button><button class="icon-btn" data-mv="1" ${i < list.length - 1 ? '' : 'disabled'} title="아래로">↓</button></div>
         <div class="ae-row"><label>짧은 표시 (목록 꼬리표)<input data-f="label" value="${esc(a.label || '')}" maxlength="8"></label>
         <label>보내는 사람 이름<input data-f="name" value="${esc(a.name || '')}" placeholder="예: 김영배" maxlength="40"></label></div>
-        <label>서명 (새 메일·답장 끝에 자동 삽입)<textarea data-f="signature" rows="3">${esc(a.signature || '')}</textarea></label>
         <div class="ae-row" style="align-items:center"><label>색<select data-f="color" class="sel">${ACCOUNT_COLORS.concat(PALETTE).filter((c, k, arr) => arr.indexOf(c) === k).map((c) => `<option value="${c}" ${c === a.color ? 'selected' : ''} style="color:${c}">■ ${c}</option>`).join('')}</select></label>
-        <button class="btn-ghost danger" data-rm style="color:var(--danger);align-self:flex-end;margin-bottom:8px">계정 빼기</button></div>
+        <button class="btn-ghost" data-rm style="color:var(--danger);align-self:flex-end;margin-bottom:8px">계정 빼기</button></div>
       </div>`).join('')}
-      <div class="modal-foot"><button class="btn-primary" data-close>닫기</button></div></div>`;
+      <div class="modal-foot"><button class="btn-ghost" data-sig>✍ 서명 설정</button><button class="btn-primary" data-close>닫기</button></div>`;
   };
   draw();
-  wrap.addEventListener('change', (e) => {
+  w.addEventListener('change', (e) => {
     const box = e.target.closest('[data-e]'); const f = e.target.dataset.f;
     if (box && f) { auth.updateAccount(box.dataset.e, { [f]: e.target.value }); renderSide(); renderList(); if (f === 'color') draw(); }
   });
-  wrap.addEventListener('click', (e) => {
+  w.addEventListener('click', (e) => {
+    if (e.target.closest('[data-close]') || e.target === w) { w.remove(); return; }
+    if (e.target.closest('[data-sig]')) { w.remove(); openSigSettings(); return; }
     const box = e.target.closest('[data-e]');
-    if (e.target.closest('[data-close]') || e.target === wrap) { wrap.remove(); return; }
     if (!box) return;
     const mv = e.target.closest('[data-mv]');
     if (mv) { auth.moveAccount(box.dataset.e, Number(mv.dataset.mv)); draw(); renderSide(); }
@@ -833,62 +1213,162 @@ function openAccSettings() {
       state.items = state.items.filter((t) => t.account !== box.dataset.e);
       if (state.folder.scope === box.dataset.e) selectFolder('all', 'INBOX');
       renderSide(); renderList(); renderBanner();
-      if (!accs().length) { wrap.remove(); gate('add'); return; }
+      if (!accs().length) { w.remove(); gate('add'); return; }
       draw();
     }
   });
-  document.body.append(wrap);
+}
+
+/* ───────── 오른쪽 클릭 메뉴 ───────── */
+function listMenu(pt) {
+  const items = targets();
+  if (!items.length) return;
+  const one = items.length === 1 ? items[0] : null;
+  const L = state.folder.label;
+  const anyUnread = items.some((t) => t.unread), anyStar = items.some((t) => t.starred);
+  const sameAcc = items.every((t) => t.account === items[0].account);
+  const labels = sameAcc ? state.labels[items[0].account] || [] : [];
+  const head = one ? '' : `<div class="pop-h">${items.length}개 대화 선택됨</div>`;
+  showPop(pt, `${head}
+    ${one ? mi('open', '열기', { icon: '📖', hint: 'Enter' }) + mi('reply', '답장', { icon: '↩', hint: 'R' }) + mi('replyAll', '전체 답장', { icon: '⤶', hint: 'A' }) + mi('forward', '전달', { icon: '↪', hint: 'F' }) + '<hr>' : ''}
+    ${anyUnread ? mi('read', '읽음으로 표시', { icon: '✉', hint: 'U' }) : mi('unread', '읽지 않음으로 표시', { icon: '✉', hint: 'U' })}
+    ${anyStar ? mi('unstar', '별표 해제', { icon: '☆', hint: 'S' }) : mi('star', '별표', { icon: '★', hint: 'S' })}
+    ${labels.length ? mi('label', '라벨 붙이기…', { icon: '🏷' }) : ''}
+    <hr>
+    ${L === 'INBOX' ? mi('archive', '보관 (받은편지함에서 빼기)', { icon: '🗄', hint: 'E' }) : ''}
+    ${L === 'TRASH' ? mi('untrash', '휴지통에서 복원', { icon: '♻' }) : mi('trash', '삭제', { icon: '🗑', hint: 'Del', cls: 'danger' })}
+    ${L === 'SPAM' ? mi('notspam', '스팸 아님', { icon: '✅' }) : mi('spam', '스팸 신고', { icon: '⚠' })}
+    ${one ? '<hr>' + mi('fromAll', '보낸 사람 메일 모두 보기', { icon: '🔎' }) + mi('newTo', '보낸 사람에게 새 메일', { icon: '✎' }) + mi('copyAddr', '보낸 사람 주소 복사', { icon: '📋' }) + mi('eml', '원본(.eml) 저장', { icon: '🧾' }) + mi('web', 'Gmail 웹에서 열기', { icon: '🌐' }) : ''}
+    ${items.length > 1 ? '<hr>' + mi('clear', '선택 해제', { icon: '✕', hint: 'Esc' }) : ''}`, async (k) => {
+    const sender = one && parseAddrList(one.from)[0];
+    if (k === 'open') openThread(one.key);
+    else if (['reply', 'replyAll', 'forward'].includes(k)) { if (state.sel !== one.key) await openThread(one.key); openCompose({ mode: k }); }
+    else if (k === 'label') labelMenu(pt, items, labels);
+    else if (k === 'fromAll' && sender) { $('#search').value = `from:${sender.email}`; state.q = $('#search').value; loadList(); }
+    else if (k === 'newTo' && sender) openCompose({ mode: 'new', account: one.account, to: sender.name ? `${sender.name} <${sender.email}>` : sender.email });
+    else if (k === 'copyAddr' && sender) { await navigator.clipboard.writeText(sender.email).catch(() => {}); toast(`복사했습니다: ${sender.email}`); }
+    else if (k === 'eml') saveEml(one);
+    else if (k === 'web') window.open(`https://mail.google.com/mail/u/${encodeURIComponent(one.account)}/#all/${one.id}`, '_blank');
+    else if (k === 'clear') { state.checked.clear(); renderList(); renderReader(); }
+    else actOn(k, items);
+  });
+}
+function labelMenu(pt, items, labels) {
+  showPop(pt, `<div class="pop-h">라벨 붙이기</div>${labels.map((l) => mi(`label:${l.id}`, esc(l.name), { icon: '🏷' })).join('')}`, (k) => actOn(k, items));
+}
+async function saveEml(t) {
+  try {
+    const raw = await gm.fetchFull(t.account, t.id);
+    const last = raw.messages[raw.messages.length - 1];
+    const data = await gm.getRawEml(t.account, last.id);
+    saveToDownloads(new Blob([b64ToBytes(data)], { type: 'message/rfc822' }), `${(t.subject || 'mail').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)}.eml`);
+  } catch (e) { fail(e, 'eml'); }
+}
+function folderMenu(pt, scope, label) {
+  const emails = scope === 'all' ? connected().map((a) => a.email) : [scope];
+  showPop(pt, `${mi('open', '열기', { icon: '📂' })}${mi('readAll', '모두 읽음으로 표시', { icon: '✉' })}${mi('refresh', '새로 고침', { icon: '⟳' })}`, async (k) => {
+    if (k === 'open') selectFolder(scope, label);
+    if (k === 'refresh') { if (state.folder.scope !== scope || state.folder.label !== label) selectFolder(scope, label); else { loadList({ silent: true }); refreshCounts(); } }
+    if (k === 'readAll') {
+      if (!confirm(`${scope === 'all' ? '모든 계정' : scope}의 '${ALL_FOLDERS.includes(label) ? FOLDERS[label][0] : '라벨'}'을 모두 읽음으로 표시할까요?`)) return;
+      toast('처리 중…', 0);
+      let n = 0;
+      try { for (const e of emails) n += await gm.markAllRead(e, label); } catch (err) { fail(err, 'readAll'); }
+      toast(`${n}개 대화를 읽음으로 표시했습니다.`);
+      if (state.folder.scope === scope && state.folder.label === label) { state.items.forEach((t) => (t.unread = false)); renderList(); }
+      refreshCounts();
+    }
+  });
+}
+
+/* ───────── 칸 너비 조절 ───────── */
+function applyWidths() {
+  const ws = pref.get('wSide', 236), wl = pref.get('wList', 420);
+  document.documentElement.style.setProperty('--w-side', `${ws}px`);
+  document.documentElement.style.setProperty('--w-list', `${wl}px`);
+}
+function bindGutter(el, key, min, max, def) {
+  el.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    const startX = e.clientX, start = pref.get(key, def);
+    el.setPointerCapture(e.pointerId);
+    document.body.classList.add('resizing');
+    const move = (ev) => {
+      const v = Math.max(min, Math.min(max, start + ev.clientX - startX));
+      document.documentElement.style.setProperty(key === 'wSide' ? '--w-side' : '--w-list', `${v}px`);
+      el._v = v;
+    };
+    const up = () => { el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); document.body.classList.remove('resizing'); if (el._v) pref.set(key, el._v); };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+  });
+  el.addEventListener('dblclick', () => { pref.set(key, def); applyWidths(); });
 }
 
 /* ───────── 단축키 ───────── */
 function onKey(e) {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
-  if (cp.open && !$('#compose').classList.contains('min')) {
+  if (cp.open && !$('#compose').classList.contains('min') && (typing || $('#compose').contains(e.target))) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); sendCompose(); }
     if (e.key === 'Escape' && !$('#suggest').hidden) { $('#suggest').hidden = true; }
     return;
   }
-  if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (typing || e.altKey) return;
   const k = e.key;
-  const t = current();
+  if ((e.ctrlKey || e.metaKey) && (k === 'a' || k === 'A')) { e.preventDefault(); state.checked = new Set(state.items.map((t) => t.key)); renderList(); renderReader(); return; }
+  if (e.ctrlKey || e.metaKey) return;
   const move = (d) => {
     const i = state.items.findIndex((x) => x.key === state.sel);
     const n = state.items[i < 0 ? 0 : Math.max(0, Math.min(state.items.length - 1, i + d))];
-    if (n) openThread(n.key, { fromList: false });
+    if (n) openThread(n.key, { scroll: true });
   };
   if (k === 'c') { e.preventDefault(); openCompose({ mode: 'new' }); }
   else if (k === 'j' || k === 'ArrowDown') { e.preventDefault(); move(1); }
   else if (k === 'k' || k === 'ArrowUp') { e.preventDefault(); move(-1); }
   else if (k === '/') { e.preventDefault(); $('#search').focus(); }
-  else if (!t || !state.thread) return;
+  else if (k === 'Delete' || k === '#') { const t = targets(); if (t.length) actOn(state.folder.label === 'TRASH' ? 'untrash' : 'trash', t); }
+  else if (k === 'e') { const t = targets(); if (t.length && state.folder.label === 'INBOX') actOn('archive', t); }
+  else if (k === 'u') { const t = targets(); if (t.length) actOn(t.some((x) => x.unread) ? 'read' : 'unread', t); }
+  else if (k === 's') { const t = targets(); if (t.length) actOn(t.some((x) => x.starred) ? 'unstar' : 'star', t); }
+  else if (k === 'Escape') { if (state.checked.size > 1) { state.checked.clear(); renderList(); renderReader(); } else closeReader(); }
+  else if (!state.thread) return;
   else if (k === 'r') { e.preventDefault(); openCompose({ mode: 'reply' }); }
   else if (k === 'a') { e.preventDefault(); openCompose({ mode: 'replyAll' }); }
   else if (k === 'f') { e.preventDefault(); openCompose({ mode: 'forward' }); }
-  else if (k === 'e') act('archive');
-  else if (k === 'Delete' || k === '#') act('trash');
-  else if (k === 'u') act('unread');
-  else if (k === 's') act('star');
-  else if (k === 'Escape') closeReader();
 }
 
 /* ───────── 이벤트 연결 ───────── */
 function bind() {
   document.addEventListener('keydown', onKey);
+  applyWidths();
+  bindGutter($('#gut-side'), 'wSide', 180, 420, 236);
+  bindGutter($('#gut-list'), 'wList', 300, 900, 420);
+
   $('#folders').addEventListener('click', (e) => {
     const f = e.target.closest('.f-item');
     if (f) { selectFolder(f.dataset.scope, f.dataset.label); return; }
     const x = e.target.closest('[data-expand]');
     if (x) { const em = x.dataset.expand; state.expanded.has(em) ? state.expanded.delete(em) : state.expanded.add(em); pref.set('expanded', [...state.expanded]); renderSide(); }
   });
+  $('#folders').addEventListener('contextmenu', (e) => {
+    const f = e.target.closest('.f-item'); if (!f) return;
+    e.preventDefault();
+    folderMenu({ x: e.clientX, y: e.clientY }, f.dataset.scope, f.dataset.label);
+  });
   document.addEventListener('click', (e) => {
     const r = e.target.closest('[data-reconnect]');
     if (r) { e.preventDefault(); doReconnect(r.dataset.reconnect); }
-    if (!$('#pop').hidden && !e.target.closest('#pop, #btn-menu, [data-mact="more"]')) closePop();
+    if (!$('#pop').hidden && !e.target.closest('#pop, #btn-menu, [data-mact="more"], .att')) closePop();
     if (!$('#suggest').hidden && !e.target.closest('#suggest')) $('#suggest').hidden = true;
+    const cancel = e.target.closest('[data-cancel]');
+    if (cancel) cancelSend(cancel.dataset.cancel);
   });
+  document.addEventListener('contextmenu', (e) => { if (!$('#pop').hidden && !e.target.closest('#pop')) closePop(); }, true);
   $('#btn-side').onclick = () => document.body.classList.add('drawer');
   $('#btn-side-close').onclick = $('#scrim').onclick = () => document.body.classList.remove('drawer');
   $('#btn-compose').onclick = $('#fab').onclick = () => { document.body.classList.remove('drawer'); openCompose({ mode: 'new' }); };
+  $('#btn-compose-pop').onclick = () => { document.body.classList.remove('drawer'); popOut(() => openCompose({ mode: 'new' })); };
+  $('#cp-pop').onclick = (e) => { e.stopPropagation(); popOut(); };
   $('#btn-add-acc').onclick = () => doAdd();
   $('#btn-menu').onclick = (e) => ($('#pop').hidden ? openMenu(e.currentTarget) : closePop());
   $('#btn-refresh').onclick = () => { loadList({ silent: !!state.items.length }); refreshCounts(); };
@@ -897,27 +1377,65 @@ function bind() {
   $('#search').addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(qTimer); state.q = $('#search').value; loadList(); } });
   $('#chip-unread').onclick = () => { state.unreadOnly = !state.unreadOnly; loadList(); };
 
+  // 목록: 클릭·Ctrl+클릭·Shift+클릭·오른쪽 클릭
+  $('#list').addEventListener('mousedown', (e) => { if (e.shiftKey) e.preventDefault(); }); // 글자 선택 방지
   $('#list').addEventListener('click', (e) => {
     if (e.target.closest('#btn-more')) { loadList({ append: true }); return; }
     const li = e.target.closest('.item'); if (!li) return;
-    const t = state.items.find((x) => x.key === li.dataset.key);
+    const key = li.dataset.key;
+    const t = state.items.find((x) => x.key === key);
     const b = e.target.closest('[data-iact]');
-    if (b) { e.stopPropagation(); act(b.dataset.iact, t); return; }
-    openThread(li.dataset.key);
+    if (b) { e.stopPropagation(); actOn(b.dataset.iact, state.checked.has(key) && state.checked.size > 1 ? checkedItems() : [t]); return; }
+    if (e.ctrlKey || e.metaKey) {
+      if (state.checked.size <= 1 && state.sel && !state.checked.size) state.checked.add(state.sel);
+      state.checked.has(key) ? state.checked.delete(key) : state.checked.add(key);
+      state.anchor = key;
+      renderList(); renderReader();
+      return;
+    }
+    if (e.shiftKey && state.anchor) {
+      const keys = state.items.map((x) => x.key);
+      const a = keys.indexOf(state.anchor), z = keys.indexOf(key);
+      if (a >= 0 && z >= 0) {
+        state.checked = new Set(keys.slice(Math.min(a, z), Math.max(a, z) + 1));
+        renderList(); renderReader();
+        return;
+      }
+    }
+    openThread(key);
+  });
+  $('#list').addEventListener('dblclick', (e) => { const li = e.target.closest('.item'); if (li && innerWidth > 860) { /* 이미 열림 */ } });
+  $('#list').addEventListener('contextmenu', (e) => {
+    const li = e.target.closest('.item'); if (!li) return;
+    e.preventDefault();
+    const key = li.dataset.key;
+    if (!state.checked.has(key)) { state.checked = new Set([key]); state.anchor = key; renderList(); if (state.sel !== key && state.checked.size <= 1) renderReader(); }
+    listMenu({ x: e.clientX, y: e.clientY });
   });
   $('#list').addEventListener('scroll', (e) => {
     const el = e.currentTarget;
     if (!state.loading && el.scrollTop + el.clientHeight > el.scrollHeight - 300 && Object.values(state.pages).some(Boolean)) loadList({ append: true });
   });
 
-  document.querySelector('.pane-read').addEventListener('click', (e) => {
+  // 읽기 영역
+  const pr = document.querySelector('.pane-read');
+  pr.addEventListener('click', (e) => {
+    if (e.target.closest('#compose')) return;
     const go = e.target.closest('[data-go="list"]');
     if (go) { $('#app').dataset.view = 'list'; return; }
+    const pa = e.target.closest('[data-popact]');
+    if (pa) { const k = pa.dataset.popact; popOut(() => openCompose({ mode: k })); return; }
+    const bulk = e.target.closest('[data-bulk]');
+    if (bulk) { const k = bulk.dataset.bulk; if (k === 'clear') { state.checked.clear(); renderList(); renderReader(); } else actOn(k, checkedItems()); return; }
     const a = e.target.closest('[data-act]');
     if (a && !a.disabled) {
       const k = a.dataset.act;
+      const t = current();
       if (['reply', 'replyAll', 'forward'].includes(k)) openCompose({ mode: k });
-      else act(k);
+      else if (k === 'unread') { actOn('unread', [t]); closeReader(); }
+      else if (k === 'star') actOn(t?.starred ? 'unstar' : 'star', [t]);
+      else if (k === 'trash') actOn(state.folder.label === 'TRASH' ? 'untrash' : 'trash', [t]);
+      else actOn(k, [t]);
       return;
     }
     const msgEl = e.target.closest('.msg');
@@ -926,41 +1444,52 @@ function bind() {
     const ma = e.target.closest('[data-mact]');
     if (ma && m) {
       if (ma.dataset.mact === 'reply') openCompose({ mode: 'reply', msg: m });
-      else showPop(ma, `<button data-x="reply">↩ 답장</button><button data-x="replyAll">⤶ 전체 답장</button><button data-x="forward">↪ 전달</button><hr><button data-x="orig">🧾 원본 보기(Gmail 웹)</button>`, (p) => {
-        p.onclick = (ev) => {
-          const x = ev.target.closest('[data-x]')?.dataset.x; if (!x) return;
-          closePop();
-          if (x === 'orig') window.open(`https://mail.google.com/mail/u/${encodeURIComponent(m.account)}/#all/${m.threadId}`, '_blank');
-          else openCompose({ mode: x, msg: m });
-        };
+      else showPop(ma, mi('reply', '답장', { icon: '↩' }) + mi('replyAll', '전체 답장', { icon: '⤶' }) + mi('forward', '전달', { icon: '↪' }) + '<hr>' + mi('eml', '원본(.eml) 저장', { icon: '🧾' }) + mi('orig', 'Gmail 웹에서 열기', { icon: '🌐' }), async (x) => {
+        if (x === 'orig') window.open(`https://mail.google.com/mail/u/${encodeURIComponent(m.account)}/#all/${m.threadId}`, '_blank');
+        else if (x === 'eml') { try { const d = await gm.getRawEml(m.account, m.id); saveToDownloads(new Blob([b64ToBytes(d)], { type: 'message/rfc822' }), `${(m.subject || 'mail').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)}.eml`); } catch (er) { fail(er, 'eml'); } }
+        else openCompose({ mode: x, msg: m });
       });
       return;
     }
     if (e.target.closest('[data-showimg]')) { fillBody(msgEl, true); return; }
+    if (e.target.closest('[data-attall]') && m) { attSaveAll(m); return; }
     const att = e.target.closest('[data-att]');
-    if (att && m) { openAttachment(m, m.attachments[Number(att.dataset.att)]); return; }
+    if (att && m) { if (e.detail >= 2) { closePop(); attOpen(m, m.attachments[Number(att.dataset.att)]); } else attMenu(att, m, m.attachments[Number(att.dataset.att)]); return; }
     if (e.target.closest('[data-toggle]')) {
-      const wasCollapsed = msgEl.classList.toggle('collapsed') === false;
+      const opened = msgEl.classList.toggle('collapsed') === false;
       state.thread.open = state.thread.open || new Set();
-      if (wasCollapsed) { state.thread.open.add(m.id); fillBody(msgEl); }
+      if (opened) { state.thread.open.add(m.id); fillBody(msgEl); }
     }
+  });
+  pr.addEventListener('contextmenu', (e) => {
+    const att = e.target.closest('[data-att]'); if (!att) return;
+    const msgEl = e.target.closest('.msg');
+    const m = state.thread?.messages.find((x) => x.id === msgEl?.dataset.mid);
+    if (!m) return;
+    e.preventDefault();
+    attMenu({ x: e.clientX, y: e.clientY }, m, m.attachments[Number(att.dataset.att)]);
   });
 
   // 쓰기
+  edMain = setupEditor($('#cp-editor'), { onFiles: addFiles });
+  edSig = setupEditor($('#cp-sig'), { onFiles: () => toast('서명에는 그림만 넣을 수 있습니다.') });
+  $('#cp-sig').addEventListener('input', syncSigBox);
+  $('#cp-quote').addEventListener('toggle', () => { const f = $('#cp-quote-view iframe'); const d = f?.contentDocument; if (d) f.style.height = Math.max(60, d.documentElement.scrollHeight + 4) + 'px'; });
   $('#cp-close').onclick = (e) => { e.stopPropagation(); closeCompose(); };
-  $('#cp-min').onclick = (e) => { e.stopPropagation(); $('#compose').classList.toggle('min'); };
+  $('#cp-min').onclick = (e) => { e.stopPropagation(); $('#compose').classList.toggle('min'); edMain.hide(); };
+  $('#cp-float').onclick = (e) => { e.stopPropagation(); setCpFloat(!cp.float); edMain.hide(); if (!cp.float) $('#app').dataset.view = 'read'; };
   $('.cp-head').onclick = () => $('#compose').classList.remove('min');
   $('#cp-ccbtn').onclick = () => { $$('#compose [data-cc]').forEach((r) => (r.hidden = false)); $('#cp-cc').focus(); };
   $('#cp-send').onclick = sendCompose;
   $('#cp-attach').onclick = () => $('#file-attach').click();
   $('#file-attach').onchange = (e) => { addFiles([...e.target.files]); e.target.value = ''; };
   $('#cp-from').onchange = () => {
-    const prevSig = acc(cp.account).signature, nextSig = acc($('#cp-from').value).signature;
-    const ta = $('#cp-text');
-    if (prevSig && ta.value.includes(prevSig)) ta.value = ta.value.replace(prevSig, nextSig || '');
-    else if (nextSig && !ta.value.includes(nextSig)) ta.value = ta.value.replace(/\s*$/, '') + `\n\n${nextSig}\n`;
-    if ($('#cp-from').value !== cp.account && cp.threadId) $('#cp-msg').textContent = '다른 계정으로 보내면 새 대화로 보내집니다.';
-    else $('#cp-msg').textContent = '';
+    const next = $('#cp-from').value;
+    const prevSig = sigHtml(acc(cp.lastFrom || cp.account));
+    if ($('#cp-sig').innerHTML === prevSig || !$('#cp-sig').textContent.trim()) $('#cp-sig').innerHTML = sigHtml(acc(next));
+    cp.lastFrom = next;
+    syncSigBox();
+    $('#cp-msg').textContent = next !== cp.account && cp.threadId ? '다른 계정으로 보내면 새 대화로 보내집니다.' : '';
   };
   $('#cp-atts').onclick = (e) => {
     const rm = e.target.closest('[data-rm]')?.dataset.rm; if (!rm) return;
@@ -968,6 +1497,11 @@ function bind() {
     renderCpAtts();
   };
   $('#compose').addEventListener('input', () => (cp.dirty = true));
+  $('#compose').addEventListener('paste', (e) => {
+    if (e.target.closest('[contenteditable]')) return; // 편집기가 처리
+    const fs = [...(e.clipboardData?.files || [])];
+    if (fs.length) { e.preventDefault(); addFiles(fs); }
+  });
   for (const id of ['#cp-to', '#cp-cc', '#cp-bcc']) {
     const el = $(id);
     el.addEventListener('input', () => suggest(el));
@@ -985,13 +1519,14 @@ function bind() {
   }
   $('#suggest').addEventListener('mousedown', (e) => { e.preventDefault(); pickSuggest(e.target.closest('li')); });
 
-  // 파일 끌어놓기·붙여넣기 → 첨부
+  // 파일 끌어놓기 → 첨부 (편집기 위에 놓은 그림은 본문에 들어감)
   let dragN = 0;
+  const dropOff = () => { dragN = 0; $('#drop').hidden = true; };
+  document.addEventListener('ybm-drop-done', dropOff);
   window.addEventListener('dragenter', (e) => { if (cp.open && e.dataTransfer?.types?.includes('Files')) { dragN++; $('#drop').hidden = false; } });
-  window.addEventListener('dragleave', () => { if (--dragN <= 0) { dragN = 0; $('#drop').hidden = true; } });
+  window.addEventListener('dragleave', () => { if (--dragN <= 0) dropOff(); });
   window.addEventListener('dragover', (e) => { if (cp.open) e.preventDefault(); });
-  window.addEventListener('drop', (e) => { if (!cp.open) return; e.preventDefault(); dragN = 0; $('#drop').hidden = true; addFiles([...e.dataTransfer.files]); });
-  $('#compose').addEventListener('paste', (e) => { const fs = [...(e.clipboardData?.files || [])]; if (fs.length) { e.preventDefault(); addFiles(fs); } });
+  window.addEventListener('drop', (e) => { if (!cp.open) return; e.preventDefault(); dropOff(); addFiles([...e.dataTransfer.files]); });
 
   // 처음 화면
   $('#gate').addEventListener('click', (e) => {
@@ -1002,7 +1537,7 @@ function bind() {
     }
     if (e.target.id === 'gate-add') doAdd();
     if (e.target.id === 'gate-cid-reset') gate('client');
-    if (e.target.id === 'gate-skip') { gateSkipped = true; afterConnect(); gate(null); }
+    if (e.target.id === 'gate-skip') { gateSkipped = true; gate(null); afterConnect(); }
   });
 
   // 만료 직전이면, 다음 클릭 때 조용히 새 토큰 받기 (팝업은 클릭 안에서만 허용)
@@ -1021,17 +1556,18 @@ function bind() {
 
   auth.onChange(() => { renderSide(); renderBanner(); });
   window.addEventListener('online', () => loadList({ silent: true }));
-  window.addEventListener('offline', () => setSync('offline', '● 오프라인'));
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && started) { loadList({ silent: true }); refreshCounts(); } });
+  window.addEventListener('offline', () => setSync('offline', '● 오프라인 (저장본 표시 중)'));
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && started && connected().length) { loadList({ silent: true }); refreshCounts(); } });
   setInterval(() => {
     if (document.visibilityState !== 'visible' || !started || state.loading) return;
     if (!connected().length) { renderBanner(); renderSide(); return; }
     loadList({ silent: true });
     refreshCounts();
   }, 90_000);
+  setInterval(() => { if (!CPWIN && connected().length) { bg.ranOnce = false; runPrefetch(); } }, 15 * 60_000);
 }
 
-/* ───────── 서비스 워커 (새 버전 안내) ───────── */
+/* ───────── 서비스 워커 (설치·새 버전 안내) ───────── */
 function registerSW() {
   if (!('serviceWorker' in navigator) || location.hostname === 'localhost' || location.hostname === '127.0.0.1') return;
   navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).then((reg) => {
@@ -1044,15 +1580,31 @@ function registerSW() {
     setInterval(() => reg.update().catch(() => {}), 60 * 60 * 1000);
   }).catch((e) => console.warn('[YB-Mail] 서비스 워커', e));
   let reloaded = false;
-  navigator.serviceWorker.addEventListener('controllerchange', () => { if (!reloaded) { reloaded = true; location.reload(); } });
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (!reloaded && !outbox.length) { reloaded = true; location.reload(); } });
 }
 
 /* ───────── 시작 ───────── */
 async function boot() {
   $('#version').textContent = DEMO ? `v${VERSION} · 점검용` : `v${VERSION}`;
+  state.unread = pref.get('unread', {});
   bind();
   document.body.classList.remove('booting');
+  if (CPWIN) {
+    // 별도 쓰기 창: 본 창에서 넘겨준 내용으로 쓰기 화면만 띄움
+    document.body.classList.add('cp-window');
+    cp.float = false;
+    document.title = '메일 쓰기 – YB-Mail';
+    if (DEMO) { const demo = await import('./demo.js'); demo.initDemo(); gm.useBackend(demo.demoBackend); }
+    let snap = null;
+    try { snap = window.opener?.__ybmTakeDraft?.(CPWIN) || null; } catch { /* 무시 */ }
+    await openCompose(snap ? { snapshot: snap } : { mode: 'new' });
+    cp.dirty = !!snap && snap.mode !== 'new';
+    auth.loadGis().catch(() => {});
+    return;
+  }
+  cache.persist();
   if (DEMO) {
+    await cache.clearAll();
     const demo = await import('./demo.js');
     demo.initDemo();
     gm.useBackend(demo.demoBackend);
@@ -1062,11 +1614,16 @@ async function boot() {
   }
   renderSide();
   renderBanner();
-  if (!auth.clientId()) { gate('client'); }
+  if (!auth.clientId()) gate('client');
   else if (!accs().length) gate('add');
-  else if (!connected().length) gate('connect');
-  else afterConnect();
+  else {
+    // 연결 전이라도 저장본으로 바로 보여 줌
+    started = true;
+    selectFolder(state.folder.scope, state.folder.label);
+    if (!connected().length) gate('connect'); else afterConnect();
+  }
   auth.loadGis().catch((e) => { gateMsg(e.message); toast(e.message, 0); });
   registerSW();
+  if (new URLSearchParams(location.search).has('compose')) setTimeout(() => openCompose({ mode: 'new' }), 600);
 }
 boot();
