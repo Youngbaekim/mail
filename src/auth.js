@@ -41,16 +41,19 @@ const listeners = new Set();
 export const onChange = (f) => { listeners.add(f); return () => listeners.delete(f); };
 
 /* ───────── 토큰 ───────── */
+const NEED = SCOPES.split(' ');
+/** 권한이 모두 있는 토큰만 인정 (권한이 늘면 한 번 다시 동의) */
+const fullScope = (t) => t.t === 'demo' || (t.scope && NEED.every((sc) => t.scope.split(' ').includes(sc)));
 export function token(email) {
   const t = ls.get(K_TOK + email);
-  return t && t.exp > Date.now() + 30_000 ? t.t : null;
+  return t && t.exp > Date.now() + 30_000 && fullScope(t) ? t.t : null;
 }
 export function tokenLeft(email) {
   const t = ls.get(K_TOK + email);
-  return t ? t.exp - Date.now() : -1;
+  return t && fullScope(t) ? t.exp - Date.now() : -1;
 }
 export function dropToken(email) { ls.del(K_TOK + email); listeners.forEach((f) => f()); }
-const saveToken = (email, r) => ls.set(K_TOK + email, { t: r.access_token, exp: Date.now() + (Number(r.expires_in) || 3599) * 1000 });
+const saveToken = (email, r) => ls.set(K_TOK + email, { t: r.access_token, scope: r.scope || SCOPES, exp: Date.now() + (Number(r.expires_in) || 3599) * 1000 });
 
 /* ───────── Google 스크립트 ───────── */
 let gisP = null;
@@ -80,7 +83,7 @@ function requestToken(override) {
       callback: (r) => {
         if (r.error) { reject(new Error(errText(r.error, r.error_description))); return; }
         if (!google.accounts.oauth2.hasGrantedAllScopes(r, SCOPES)) {
-          reject(new Error('메일 권한에 체크하지 않았습니다. 다시 연결하면서 "Gmail" 항목을 체크해 주세요.'));
+          reject(new Error('권한 항목 중 체크하지 않은 것이 있습니다. 다시 연결하면서 Gmail 관련 항목(메일·설정)을 모두 체크해 주세요.'));
           return;
         }
         resolve(r);

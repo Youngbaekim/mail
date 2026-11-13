@@ -163,6 +163,8 @@ export function parseThread(email, t) {
       subject: hdr(H, 'Subject'),
       messageId: hdr(H, 'Message-ID') || hdr(H, 'Message-Id'),
       references: hdr(H, 'References'),
+      inReplyTo: hdr(H, 'In-Reply-To'),
+      bcc: hdr(H, 'Bcc'),
       snippet: decodeEntities(m.snippet || ''),
       ...body,
     };
@@ -255,24 +257,66 @@ export const modifyThread = (email, id, add = [], remove = []) =>
 export const trashThread = (email, id) => call(email, `threads/${id}/trash`, { method: 'POST' });
 export const untrashThread = (email, id) => call(email, `threads/${id}/untrash`, { method: 'POST' });
 
-/** 원문 보내기 — 4MB 이하는 일반 호출, 그보다 크면 업로드 방식(최대 35MB) */
-export async function sendMime(email, rawStr, threadId) {
+/** 원문 올리기 — 4MB 이하는 일반 호출, 그보다 크면 업로드 방식(최대 35MB) */
+async function putMime(email, path, method, rawStr, meta, wrap) {
   const bytes = new TextEncoder().encode(rawStr);
   if (backend || bytes.length < 4 * 1024 * 1024) {
     const raw = toB64url(bytesToB64(bytes));
-    return call(email, 'messages/send', { method: 'POST', body: threadId ? { raw, threadId } : { raw } });
+    return call(email, path, { method, body: wrap({ raw, ...meta }) });
   }
   const t = token(email);
   if (!t) throw new AuthError(email);
   const b = 'ybm' + Date.now().toString(36);
-  const head = `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(threadId ? { threadId } : {})}\r\n--${b}\r\nContent-Type: message/rfc822\r\n\r\n`;
+  const head = `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(wrap(meta))}\r\n--${b}\r\nContent-Type: message/rfc822\r\n\r\n`;
   const blob = new Blob([head, bytes, `\r\n--${b}--`]);
-  const r = await fetch('https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=multipart', {
-    method: 'POST', headers: { Authorization: `Bearer ${t}`, 'Content-Type': `multipart/related; boundary=${b}` }, body: blob,
+  const r = await fetch(`https://gmail.googleapis.com/upload/gmail/v1/users/me/${path}?uploadType=multipart`, {
+    method, headers: { Authorization: `Bearer ${t}`, 'Content-Type': `multipart/related; boundary=${b}` }, body: blob,
   });
   if (r.status === 401) { dropToken(email); throw new AuthError(email); }
-  if (!r.ok) { let m = r.status; try { m = (await r.json()).error?.message || m; } catch { /* 무시 */ } throw new Error(`보내기 실패: ${m}`); }
+  if (!r.ok) { let m = r.status; try { m = (await r.json()).error?.message || m; } catch { /* 무시 */ } throw new Error(`Gmail 오류: ${m}`); }
   return r.json();
+}
+const tid = (threadId) => (threadId ? { threadId } : {});
+export const sendMime = (email, rawStr, threadId) => putMime(email, 'messages/send', 'POST', rawStr, tid(threadId), (x) => x);
+
+/* ───────── 임시메일함(Gmail 임시보관함) ───────── */
+export const createDraft = (email, rawStr, threadId) => putMime(email, 'drafts', 'POST', rawStr, tid(threadId), (x) => ({ message: x }));
+export const updateDraft = (email, id, rawStr, threadId) => putMime(email, `drafts/${id}`, 'PUT', rawStr, tid(threadId), (x) => ({ id, message: x }));
+export const deleteDraft = (email, id) => call(email, `drafts/${id}`, { method: 'DELETE' });
+/** 메시지 id → 임시 저장 id */
+export async function draftIdOf(email, messageId) {
+  let pageToken;
+  do {
+    const r = await call(email, 'drafts', { query: { maxResults: 100, pageToken } });
+    const hit = (r.drafts || []).find((d) => d.message?.id === messageId);
+    if (hit) return hit.id;
+    pageToken = r.nextPageToken;
+  } while (pageToken);
+  return null;
+}
+
+/* ───────── 차단(필터) — gmail.settings.basic 권한 ───────── */
+/** 보낸 사람 차단: 앞으로 오는 메일을 스팸함으로 (스팸 지정이 거부되면 휴지통으로) */
+export async function blockSender(email, from) {
+  try {
+    return { ...(await call(email, 'settings/filters', { method: 'POST', body: { criteria: { from }, action: { addLabelIds: ['SPAM'], removeLabelIds: ['INBOX'] } } })), to: 'SPAM' };
+  } catch (e) {
+    if (e instanceof AuthError) throw e;
+    return { ...(await call(email, 'settings/filters', { method: 'POST', body: { criteria: { from }, action: { addLabelIds: ['TRASH'] } } })), to: 'TRASH' };
+  }
+}
+export async function listBlocked(email) {
+  const r = await call(email, 'settings/filters');
+  return (r.filter || []).filter((f) => f.criteria?.from && ((f.action?.addLabelIds || []).some((l) => l === 'SPAM' || l === 'TRASH')))
+    .map((f) => ({ id: f.id, from: f.criteria.from, to: (f.action.addLabelIds || []).includes('SPAM') ? 'SPAM' : 'TRASH' }));
+}
+export const unblock = (email, id) => call(email, `settings/filters/${id}`, { method: 'DELETE' });
+/** 그 사람이 보낸 기존 메일도 스팸함으로 */
+export async function moveFromSender(email, from, label = 'SPAM') {
+  const r = await call(email, 'threads', { query: { q: `from:${from}`, maxResults: 100 } });
+  const ids = (r.threads || []).map((t) => t.id);
+  if (label === 'TRASH') await trashMany(email, ids); else await modifyMany(email, ids, ['SPAM'], ['INBOX']);
+  return ids.length;
 }
 
 /** 사용자 라벨 목록 */

@@ -52,7 +52,7 @@ const DOT = 'iVBORw0KGgoAAAANSUhEUgAAADAAAAAMCAYAAAAkuj5RAAAAL0lEQVR4nGPQz7_2fyh
 const PDF = b64u('%PDF-1.4\n% demo file\n');
 
 function seed() {
-  for (const a of DEMO_ACCOUNTS) db[a.email] = { threads: new Map(), att: {}, labels: [] };
+  for (const a of DEMO_ACCOUNTS) db[a.email] = { threads: new Map(), att: {}, labels: [], drafts: [], filters: [] };
   const S = 'ybkim@ssu.ac.kr', P = 'youngpeace@gmail.com';
   db[S].labels = [{ id: 'Label_1', name: '대학혁신지원사업', type: 'user' }, { id: 'Label_2', name: 'CQI', type: 'user' }];
   db[P].labels = [{ id: 'Label_9', name: '테니스', type: 'user' }];
@@ -73,6 +73,7 @@ function seed() {
 
   thread(P, [{ from: '테니스 동호회 <club@example.com>', to: 'youngpeace@gmail.com', subject: '이번 주 토요일 정기전 조 편성', min: 35, labels: ['INBOX', 'UNREAD', 'Label_9'], text: '토요일 오전 7시, 1코트 A조입니다.\n늦지 않게 와 주세요!' }]);
   thread(P, [{ from: '한국투자증권 <noreply@example.com>', to: 'youngpeace@gmail.com', subject: '[알림] 주문 체결 내역 안내', min: 60 * 5, labels: ['INBOX'], html: '<div style="font-family:sans-serif"><h3 style="color:#c00">체결 안내</h3><p>고객님의 주문이 체결되었습니다.</p></div>' }]);
+  thread(P, [{ from: '무료 쿠폰 <promo@spam.example>', to: 'youngpeace@gmail.com', subject: '[광고] 오늘만 90% 할인 쿠폰', min: 60 * 8, labels: ['SPAM'], text: '지금 바로 받으세요.' }]);
   thread(P, [{ from: 'GitHub <noreply@github.com>', to: 'youngpeace@gmail.com', subject: '[youngbaekim/receipt] Deploy to GitHub Pages: succeeded', min: 60 * 20, labels: ['INBOX', 'UNREAD'], text: 'All jobs have completed successfully.\nhttps://github.com/youngbaekim/receipt/actions' }]);
 }
 
@@ -111,6 +112,8 @@ export function demoBackend(email, method, path, q, body) {
     let list = [...D.threads.values()].filter((t) => {
       const L = tLabels(t);
       if (!ids.includes('TRASH') && t.messages.every((x) => x.labelIds.includes('TRASH'))) return false;
+      if (!t.messages.length) return false;
+      if (!ids.includes('SPAM') && t.messages.every((x) => x.labelIds.includes('SPAM'))) return false;
       return ids.every((i) => L.has(i)) && matchQ(t, q.q);
     }).sort((a, b) => tDate(b) - tDate(a));
     const start = Number(q.pageToken || 0), max = Number(q.maxResults || 25);
@@ -148,6 +151,33 @@ export function demoBackend(email, method, path, q, body) {
     D.threads.get(tid).messages.push(msg(email, tid, { from: `김영배 <${email}>`, to: (/^To: (.*)$/m.exec(raw) || [])[1], subject: decoded, min: 0, labels: ['SENT'], text: '(YB-Mail 점검용으로 보낸 메일)' }));
     return delay({ id: 'm' + seq, threadId: tid });
   }
+  // 임시 저장
+  if (path === 'drafts' && method === 'GET') return delay({ drafts: D.drafts.map((d) => ({ id: d.id, message: { id: d.mid, threadId: d.tid } })) });
+  if ((path === 'drafts' && method === 'POST') || ((m = /^drafts\/(\w+)$/.exec(path)) && method === 'PUT')) {
+    const raw = decodeBytes(b64ToBytes(body.message.raw));
+    window.__ybDrafts = (window.__ybDrafts || []).concat(raw);
+    let d = m ? D.drafts.find((x) => x.id === m[1]) : null;
+    const tid = body.message.threadId || d?.tid || 't' + (++seq);
+    if (!D.threads.has(tid)) D.threads.set(tid, { id: tid, historyId: '0', messages: [] });
+    const t = D.threads.get(tid);
+    if (d) t.messages = t.messages.filter((x) => x.id !== d.mid);
+    const subj = (/^Subject: (.*(?:\r\n .*)*)/m.exec(raw)?.[1] || '').replace(/=\?UTF-8\?B\?([^?]+)\?=(\r\n )?/g, (_, b) => decodeBytes(b64ToBytes(b)));
+    const html = (() => { const i = raw.indexOf('Content-Type: text/html'); if (i < 0) return ''; const j = raw.indexOf('\r\n\r\n', i); const k = raw.indexOf('\r\n--', j); return decodeBytes(b64ToBytes(raw.slice(j + 4, k).replace(/\r\n/g, ''))); })();
+    const nm = msg(email, tid, { from: `김영배 <${email}>`, to: (/^To: (.*)$/m.exec(raw) || [])[1] || '', subject: subj, min: 0, labels: ['DRAFT'], html });
+    t.messages.push(nm);
+    bump(t);
+    if (d) d.mid = nm.id; else { d = { id: 'r' + (++seq), mid: nm.id, tid }; D.drafts.push(d); }
+    return delay({ id: d.id, message: { id: nm.id, threadId: tid } });
+  }
+  if ((m = /^drafts\/(\w+)$/.exec(path)) && method === 'DELETE') {
+    const d = D.drafts.find((x) => x.id === m[1]);
+    if (d) { const t = D.threads.get(d.tid); t.messages = t.messages.filter((x) => x.id !== d.mid); if (!t.messages.length) D.threads.delete(d.tid); else bump(t); D.drafts = D.drafts.filter((x) => x !== d); }
+    return delay({});
+  }
+  // 필터(차단)
+  if (path === 'settings/filters' && method === 'GET') return delay({ filter: D.filters });
+  if (path === 'settings/filters' && method === 'POST') { const f = { id: 'f' + (++seq), ...body }; D.filters.push(f); return delay(f); }
+  if ((m = /^settings\/filters\/(\w+)$/.exec(path)) && method === 'DELETE') { D.filters = D.filters.filter((f) => f.id !== m[1]); return delay({}); }
   return Promise.reject(new Error('demo: ' + path));
 }
 
