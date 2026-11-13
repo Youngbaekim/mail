@@ -1265,20 +1265,91 @@ function afterConnect() {
   else gate(null);
   if (!started) { started = true; selectFolder(state.folder.scope, state.folder.label); }
   else loadList({ silent: true });
-  if (connected().length) { refreshCounts(); setTimeout(runPrefetch, 2500); }
+  if (connected().length) { refreshCounts(); setTimeout(runPrefetch, 2500); setTimeout(checkNewMail, 1500); }
+  syncNotifAsk();
 }
 
 /* ───────── 설정 메뉴 ───────── */
 let installEvt = null;
-window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvt = e; });
-window.addEventListener('appinstalled', () => { installEvt = null; toast('YB-Mail을 앱으로 설치했습니다.'); });
-const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || matchMedia('(display-mode: minimal-ui)').matches || navigator.standalone;
+/** 프로그램으로 설치되지 않았고, 브라우저가 설치를 지원하면 [설치하기] 단추 표시 */
+function syncInstall() { const off = !installEvt || isStandalone() || !!CPWIN; for (const id of ['#btn-install', '#btn-install2']) { const b = $(id); if (b) b.hidden = off; } }
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvt = e; syncInstall(); });
+window.addEventListener('appinstalled', () => { installEvt = null; syncInstall(); toast('YB-Mail을 프로그램으로 설치했습니다. 바탕화면·시작 메뉴에서 여세요.', 7000); });
+async function doInstall() {
+  if (!installEvt) { toast('Chrome·Edge 주소창 오른쪽의 설치 아이콘(⊕)을 누르거나, 메뉴(⋮) → 앱 → "YB-Mail 설치"를 고르세요.', 9000); return; }
+  installEvt.prompt();
+  const r = await installEvt.userChoice.catch(() => ({ outcome: 'dismissed' }));
+  if (r.outcome !== 'accepted') toast('설치를 취소했습니다. 언제든 [설치하기]를 다시 누르면 됩니다.');
+  installEvt = null; syncInstall();
+}
+
+/* ───────── 새 메일 알림 (받은편지함만, 앱이 열려 있는 동안) ───────── */
+const notif = {
+  on: pref.get('notifOn', true),
+  seen: new Set(pref.get('notifSeen', [])), // 이미 본(알린) 대화 key
+  primed: new Set(),                          // 첫 확인을 마친 계정 (켜자마자 예전 메일로 알림 폭탄 방지)
+  busy: false,
+};
+const notifSupported = () => 'Notification' in window;
+function syncNotifAsk() {
+  const ask = $('#notif-ask');
+  ask.hidden = !(notif.on && notifSupported() && Notification.permission === 'default' && !pref.get('notifLater', false) && connected().length && !CPWIN);
+}
+async function enableNotif() {
+  if (!notifSupported()) { toast('이 브라우저는 알림을 지원하지 않습니다.'); return false; }
+  const p = await Notification.requestPermission();
+  if (p === 'granted') { notif.on = true; pref.set('notifOn', true); toast('새 메일 알림을 켰습니다.'); }
+  else toast('알림이 차단되어 있습니다. 주소창 왼쪽 자물쇠(사이트 설정) → 알림 → 허용으로 바꿔 주세요.', 9000);
+  syncNotifAsk();
+  return p === 'granted';
+}
+function saveSeen() { pref.set('notifSeen', [...notif.seen].slice(-800)); }
+async function checkNewMail() {
+  if (notif.busy || !notif.on || CPWIN) return;
+  notif.busy = true;
+  try {
+    for (const a of connected()) {
+      const r = await gm.listThreads(a.email, { labelIds: ['INBOX'], q: 'is:unread', max: 15 }).catch(() => null);
+      if (!r) continue;
+      const fresh = r.threads.filter((t) => !notif.seen.has(`${t.key}|${t.count}`));
+      r.threads.forEach((t) => notif.seen.add(`${t.key}|${t.count}`));
+      if (!notif.primed.has(a.email)) { notif.primed.add(a.email); continue; } // 첫 확인은 기록만
+      if (!fresh.length) continue;
+      state.unread[a.email] = await gm.unreadCount(a.email, 'INBOX').catch(() => state.unread[a.email]);
+      renderSide();
+      if (state.folder.label === 'INBOX' && (state.folder.scope === 'all' || state.folder.scope === a.email)) loadList({ silent: true });
+      if (notifSupported() && Notification.permission === 'granted' && !(document.hasFocus() && document.visibilityState === 'visible')) {
+        for (const t of fresh.slice(0, 3).reverse()) showMailNotif(a, t);
+        if (fresh.length > 3) new Notification(`YB-Mail · ${accLabel(a)}`, { body: `새 메일 ${fresh.length}통이 왔습니다.`, icon: 'icons/icon-192.png', tag: `ybm-many-${a.email}` });
+      }
+    }
+    saveSeen();
+  } finally { notif.busy = false; }
+}
+function showMailNotif(a, t) {
+  const who = gm.shortName(t.from) || t.senders[0] || '보낸 사람';
+  const n = new Notification(`${who} · ${accLabel(a)}`, {
+    body: `${t.subject}\n${t.snippet}`.slice(0, 180),
+    icon: 'icons/icon-192.png',
+    badge: 'icons/favicon-64.png',
+    tag: t.key,
+    silent: false,
+  });
+  n.onclick = async () => {
+    window.focus();
+    n.close();
+    if (!state.items.some((x) => x.key === t.key)) { state.items.unshift(t); renderList(); }
+    openThread(t.key, { scroll: true });
+  };
+}
 
 async function openMenu(anchor) {
   const usage = await cache.usage();
   showPop(anchor, `
     <div class="pop-row">화면 <select id="m-theme" class="sel"><option value="system">기기 설정 따름</option><option value="light">밝게</option><option value="dark">어둡게</option></select></div>
     ${mi('img', `${state.showImages ? '☑' : '☐'} 메일 속 외부 그림 바로 표시`)}
+    ${mi('notif', `${notif.on && notifSupported() && Notification.permission === 'granted' ? '☑' : '☐'} 새 메일 알림 (받은편지함)`)}
     <hr>
     ${mi('sig', '서명 만들기·고치기', { icon: '✍' })}
     ${mi('acc', '계정 설정 (이름·색·순서)', { icon: '👤' })}
@@ -1293,6 +1364,10 @@ async function openMenu(anchor) {
     ${!isStandalone() ? mi('install', installEvt ? '앱으로 설치 (바탕화면·작업표시줄)' : '앱으로 설치하는 방법', { icon: '⬇' }) : ''}
     ${mi('cid', '클라이언트 ID 바꾸기', { icon: '🔑' })}
     ${mi('update', `새 버전 확인 (v${VERSION})`, { icon: '⟳' })}`, async (k) => {
+    if (k === 'notif') {
+      if (notif.on && Notification.permission === 'granted') { notif.on = false; pref.set('notifOn', false); toast('새 메일 알림을 껐습니다.'); }
+      else { notif.on = true; pref.set('notifOn', true); pref.set('notifLater', false); enableNotif(); }
+    }
     if (k === 'img') { state.showImages = !state.showImages; pref.set('showImages', state.showImages); if (state.thread) renderReader(); toast(state.showImages ? '외부 그림을 바로 표시합니다.' : '외부 그림을 숨깁니다(메일마다 표시 가능).'); }
     if (k === 'sig') openSigSettings();
     if (k === 'acc') openAccSettings();
@@ -1300,10 +1375,7 @@ async function openMenu(anchor) {
     if (k === 'add') doAdd();
     if (k === 'prefetch') { bg.ranOnce = false; runPrefetch(); }
     if (k === 'wipe' && confirm('이 기기에 저장한 메일 사본을 모두 지울까요?\n(Gmail 서버의 메일은 그대로이며, 다시 미리 받습니다)')) { await cache.clearAll(); toast('기기 저장본을 지웠습니다.'); }
-    if (k === 'install') {
-      if (installEvt) { installEvt.prompt(); const r = await installEvt.userChoice; if (r.outcome !== 'accepted') toast('설치를 취소했습니다.'); installEvt = null; }
-      else toast('Chrome·Edge 주소창 오른쪽의 설치 아이콘(⊕)을 누르거나, 메뉴(⋮) → 앱 → "YB-Mail 설치"를 고르세요. 휴대폰은 "홈 화면에 추가".', 9000);
-    }
+    if (k === 'install') doInstall();
     if (k === 'cid') { const v = prompt('OAuth 클라이언트 ID', auth.clientId()); if (v != null) { auth.setClientId(v); toast('저장했습니다. 계정을 다시 연결하세요.'); } }
     if (k === 'update') navigator.serviceWorker?.getRegistration().then((r) => r?.update()).then(() => toast('확인했습니다. 새 버전이 있으면 안내가 뜹니다.'));
   });
@@ -1606,6 +1678,9 @@ function bind() {
   $('#btn-compose-pop').onclick = () => { document.body.classList.remove('drawer'); popOut(() => openCompose({ mode: 'new' })); };
   $('#cp-pop').onclick = (e) => { e.stopPropagation(); popOut(); };
   $('#btn-add-acc').onclick = () => doAdd();
+  $('#btn-install').onclick = $('#btn-install2').onclick = () => doInstall();
+  $('#notif-yes').onclick = () => enableNotif();
+  $('#notif-no').onclick = () => { pref.set('notifLater', true); syncNotifAsk(); };
   $('#btn-menu').onclick = (e) => ($('#pop').hidden ? openMenu(e.currentTarget) : closePop());
   $('#btn-refresh').onclick = () => { loadList({ silent: !!state.items.length }); refreshCounts(); };
   let qTimer;
@@ -1822,6 +1897,7 @@ function bind() {
     refreshCounts();
   }, 90_000);
   setInterval(() => { if (!CPWIN && connected().length) { bg.ranOnce = false; runPrefetch(); } }, 15 * 60_000);
+  setInterval(() => { if (started && connected().length) checkNewMail(); }, 60_000);
 }
 
 /* ───────── 서비스 워커 (설치·새 버전 안내) ───────── */
@@ -1866,6 +1942,7 @@ async function boot() {
     demo.initDemo();
     gm.useBackend(demo.demoBackend);
     auth.demoSetup(demo.DEMO_ACCOUNTS);
+    window.__ybCheck = checkNewMail;
     afterConnect();
     return;
   }
@@ -1881,6 +1958,7 @@ async function boot() {
   }
   auth.loadGis().catch((e) => { gateMsg(e.message); toast(e.message, 0); });
   registerSW();
+  syncInstall();
   if (new URLSearchParams(location.search).has('compose')) setTimeout(() => openCompose({ mode: 'new' }), 600);
 }
 boot();

@@ -181,4 +181,8 @@ export function demoBackend(email, method, path, q, body) {
   return Promise.reject(new Error('demo: ' + path));
 }
 
-export function initDemo() { seed(); }
+export function initDemo() {
+  seed();
+  // 점검용: 새 메일 도착 흉내
+  window.__ybDemoNew = (acc = 'ybkim@ssu.ac.kr') => thread(acc, [{ from: '기획조정실 이○○ <plan@ssu.ac.kr>', to: acc, subject: '[긴급] 2027 대학혁신지원사업 계획서 제출 일정 변경', min: 0, labels: ['INBOX', 'UNREAD'], text: '팀장님, 계획서 제출 마감이 11. 20.(금)로 앞당겨졌습니다. 확인 부탁드립니다.' }]);
+}

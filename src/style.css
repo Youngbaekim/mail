@@ -345,6 +345,16 @@ button.acc-state.off:hover { outline: 1px solid var(--warn); }
 .chk-row { display: flex; align-items: center; gap: 8px; font-size: 13.5px; margin: 4px 0 10px; }
 .chk-row input { width: 16px; height: 16px; accent-color: var(--accent); }
 
+/* 설치하기 · 알림 */
+.btn-install { padding: 5px 11px; border-radius: 14px; background: linear-gradient(135deg, #3f86f0, #1e55b8); color: #fff; font-size: 12.5px; font-weight: 700; white-space: nowrap; box-shadow: 0 2px 8px rgba(30,85,184,.35); animation: ybpulse 2.4s ease-in-out 3; }
+.btn-install:hover { filter: brightness(1.08); }
+.only-drawer-inst { display: none; }
+@media (max-width: 1180px) { .only-drawer-inst:not([hidden]) { display: inline-block; } }
+@keyframes ybpulse { 50% { box-shadow: 0 0 0 5px rgba(63,134,240,.25); } }
+.notif-ask { display: flex; align-items: center; gap: 8px; margin: 0 12px 8px; padding: 9px 10px; border-radius: 10px; background: var(--accent-soft); font-size: 13px; }
+.notif-ask span { flex: 1; min-width: 0; }
+.notif-ask .btn-sm { flex: none; }
+
 /* 칸 너비 조절 */
 .gutter { position: absolute; top: 0; bottom: 0; right: -4px; width: 8px; z-index: 5; cursor: col-resize; }
 .gutter:hover, body.resizing .gutter { background: color-mix(in srgb, var(--accent) 25%, transparent); }
