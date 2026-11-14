@@ -72,6 +72,15 @@
         <button class="icon-btn" data-act="trash" title="삭제 (Del) — 휴지통으로" disabled>🗑</button>
         <button class="icon-btn" data-act="unread" title="읽지 않음으로 (U)" disabled>✉</button>
         <button class="icon-btn" data-act="star" title="별표 (S)" disabled>☆</button>
+        <span class="sep"></span>
+        <span class="zoom" title="본문 확대·축소 (Ctrl + / Ctrl − / Ctrl 0, Ctrl+마우스 휠)">
+          <button class="zm-b" id="zoom-out" aria-label="축소">−</button>
+          <input type="range" id="zoom-range" min="60" max="200" step="10" value="100" aria-label="본문 배율" />
+          <button class="zm-b" id="zoom-in" aria-label="확대">+</button>
+          <button class="zm-v" id="zoom-val" title="눌러서 100%로">100%</button>
+        </span>
+        <button class="icon-btn" id="btn-print" title="인쇄 (Ctrl+P)" aria-label="인쇄" disabled>🖨</button>
+        <button class="icon-btn theme-tg" id="btn-theme" title="밝게/어둡게 전환" aria-label="화면 밝기 전환">🌙</button>
       </header>
       <div class="read-wrap" id="read-wrap">
         <div id="reader" class="reader" hidden></div>
@@ -102,8 +111,19 @@
             <label class="cp-row"><span>제목</span><input id="cp-subject" type="text" /></label>
             <div id="cp-atts" class="atts cp-atts" hidden></div>
             <div id="cp-editor" class="cp-editor" contenteditable="true" spellcheck="false" aria-label="내용"></div>
-            <details id="cp-quote" class="cp-quote" hidden><summary>원문 포함됨 (눌러서 보기)</summary><div id="cp-quote-view"></div></details>
             <div id="cp-sigwrap" class="cp-sigwrap"><span class="cp-sig-l">서명</span><div id="cp-sig" class="cp-sig" contenteditable="true" spellcheck="false" aria-label="서명"></div></div>
+            <div id="cp-quote" class="cp-quote" hidden>
+              <div class="cpq-bar">
+                <button type="button" class="cpq-toggle" id="cpq-toggle">▸ 원문 포함됨 (눌러서 보기)</button>
+                <span class="grow"></span>
+                <button type="button" class="btn-ghost btn-sm" id="cpq-edit" title="원문을 펼쳐 필요 없는 부분만 지우거나 고치기">원문 편집</button>
+                <button type="button" class="btn-ghost btn-sm" id="cpq-remove" title="원문 전체를 빼고 보내기">원문 빼기</button>
+                <button type="button" class="btn-ghost btn-sm" id="cpq-restore" hidden>원문 다시 넣기</button>
+              </div>
+              <p id="cpq-off-note" class="cpq-off" hidden>원문을 빼고 보냅니다.</p>
+              <div id="cp-quote-view" hidden></div>
+              <div id="cp-quote-edit" class="cp-quote-edit" contenteditable="true" spellcheck="false" hidden aria-label="원문 편집"></div>
+            </div>
           </div>
           <footer class="cp-foot">
             <button class="btn-primary" id="cp-send" title="보내기 (Ctrl+Enter)">보내기</button>

@@ -55,7 +55,9 @@ export function shortName(from) {
 }
 
 function summarize(email, t, myEmail) {
-  const msgs = t.messages || [];
+  const all = t.messages || [];
+  const live = all.filter((m) => !(m.labelIds || []).includes('TRASH'));
+  const msgs = live.length ? live : all; // 하나만 지운 메일은 개수·미리보기에서 제외
   const last = msgs[msgs.length - 1] || {};
   const first = msgs[0] || {};
   const labels = new Set(msgs.flatMap((m) => m.labelIds || []));
@@ -258,6 +260,8 @@ export const modifyThread = (email, id, add = [], remove = []) =>
   call(email, `threads/${id}/modify`, { method: 'POST', body: { addLabelIds: add, removeLabelIds: remove } });
 export const trashThread = (email, id) => call(email, `threads/${id}/trash`, { method: 'POST' });
 export const untrashThread = (email, id) => call(email, `threads/${id}/untrash`, { method: 'POST' });
+export const trashMessage = (email, id) => call(email, `messages/${id}/trash`, { method: 'POST' });
+export const untrashMessage = (email, id) => call(email, `messages/${id}/untrash`, { method: 'POST' });
 
 /** 원문 올리기 — 4MB 이하는 일반 호출, 그보다 크면 업로드 방식(최대 35MB) */
 async function putMime(email, path, method, rawStr, meta, wrap) {

@@ -151,6 +151,13 @@ export function demoBackend(email, method, path, q, body) {
     D.threads.get(tid).messages.push(msg(email, tid, { from: `김영배 <${email}>`, to: (/^To: (.*)$/m.exec(raw) || [])[1], subject: decoded, min: 0, labels: ['SENT'], text: '(YB-Mail 점검용으로 보낸 메일)' }));
     return delay({ id: 'm' + seq, threadId: tid });
   }
+  if ((m = /^messages\/(\w+)\/(un)?trash$/.exec(path))) {
+    for (const t of D.threads.values()) for (const x of t.messages) if (x.id === m[1]) {
+      x.labelIds = m[2] ? x.labelIds.filter((l) => l !== 'TRASH') : [...x.labelIds.filter((l) => l !== 'INBOX'), 'TRASH'];
+      bump(t);
+    }
+    return delay({});
+  }
   // 임시 저장
   if (path === 'drafts' && method === 'GET') return delay({ drafts: D.drafts.map((d) => ({ id: d.id, message: { id: d.mid, threadId: d.tid } })) });
   if ((path === 'drafts' && method === 'POST') || ((m = /^drafts\/(\w+)$/.exec(path)) && method === 'PUT')) {
