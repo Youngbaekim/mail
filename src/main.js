@@ -464,7 +464,12 @@ function renderReader() {
       <div class="m-body">
         ${files.length ? `<div class="atts atts-top">${files.map((x) => attChip(m, x)).join('')}${files.length > 1 ? `<button class="btn-ghost btn-sm att-all" data-attall title="모든 첨부를 고른 폴더에 저장">⬇ 모두 받기 (${files.length})</button>` : ''}</div>` : ''}
         <div class="m-imgnote"></div>
-        <iframe class="m-frame" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" title="메일 본문"></iframe>
+        <div class="m-frame-wrap">
+          <i class="zh zh-l" data-zh="-1" title="끌어서 본문 확대·축소 (두 번 누르면 100%)"></i>
+          <iframe class="m-frame" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" title="메일 본문"></iframe>
+          <i class="zh zh-r" data-zh="1" title="끌어서 본문 확대·축소 (두 번 누르면 100%)"></i>
+          <b class="zh-tip" hidden></b>
+        </div>
       </div>
     </article>`;
   });
@@ -706,11 +711,39 @@ const targets = () => (state.checked.size ? checkedItems() : [current()].filter(
 
 /* ───────── 본문 확대·축소 ───────── */
 function setZoom(z) {
-  state.zoom = Math.max(60, Math.min(200, Math.round(z / 10) * 10));
+  state.zoom = Math.max(60, Math.min(200, Math.round(z / 5) * 5));
   pref.set('zoom', state.zoom);
   $('#zoom-range').value = state.zoom;
   $('#zoom-val').textContent = `${state.zoom}%`;
   $$('#reader .m-frame').forEach((f) => { const d = f.contentDocument; if (d) { d.documentElement.style.zoom = state.zoom / 100; f._fit?.(); setTimeout(() => f._fit?.(), 60); } });
+}
+/** 본문 좌우 핸들: 바깥으로 끌면 확대, 안쪽으로 끌면 축소 (비율 그대로) */
+function bindZoomHandles() {
+  const reader = $('#reader');
+  reader.addEventListener('pointerdown', (e) => {
+    const h = e.target.closest('.zh');
+    if (!h) return;
+    e.preventDefault();
+    const wrap = h.closest('.m-frame-wrap');
+    const tip = $('.zh-tip', wrap);
+    const dir = Number(h.dataset.zh); // 오른쪽 +1, 왼쪽 -1
+    const startX = e.clientX, startZ = state.zoom, width = wrap.getBoundingClientRect().width || 600;
+    h.setPointerCapture(e.pointerId);
+    document.body.classList.add('zooming');
+    tip.hidden = false;
+    const move = (ev) => {
+      const dx = (ev.clientX - startX) * dir; // 바깥쪽으로 끈 거리
+      setZoom(startZ * (1 + (2 * dx) / width));
+      tip.textContent = `${state.zoom}%`;
+    };
+    const up = () => {
+      h.removeEventListener('pointermove', move); h.removeEventListener('pointerup', up); h.removeEventListener('pointercancel', up);
+      document.body.classList.remove('zooming');
+      setTimeout(() => (tip.hidden = true), 600);
+    };
+    h.addEventListener('pointermove', move); h.addEventListener('pointerup', up); h.addEventListener('pointercancel', up);
+  });
+  reader.addEventListener('dblclick', (e) => { if (e.target.closest('.zh')) setZoom(100); });
 }
 function onZoomWheel(e) {
   if (!e.ctrlKey) return;
@@ -1868,6 +1901,7 @@ function bind() {
   $('#zoom-in').onclick = () => setZoom(state.zoom + 10);
   $('#zoom-out').onclick = () => setZoom(state.zoom - 10);
   $('#zoom-range').oninput = (e) => setZoom(Number(e.target.value));
+  bindZoomHandles();
   $('#zoom-val').onclick = () => setZoom(100);
   $('#read-wrap').addEventListener('wheel', onZoomWheel, { passive: false });
   setZoom(state.zoom);

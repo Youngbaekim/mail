@@ -369,6 +369,20 @@ button.acc-state.off:hover { outline: 1px solid var(--warn); }
 @container rh (max-width: 520px) { .zoom { display: none; } }
 @media (max-width: 860px) { .zoom, #btn-print { display: none; } }
 
+/* 본문 좌우 확대·축소 핸들 */
+.m-frame-wrap { position: relative; }
+.zh { position: absolute; top: 0; bottom: 0; width: 12px; z-index: 2; cursor: ew-resize; touch-action: none; }
+.zh-l { left: -13px; }
+.zh-r { right: -13px; }
+.zh::after { content: ''; position: absolute; top: 50%; left: 4px; width: 4px; height: 44px; margin-top: -22px; border-radius: 3px; background: var(--line); transition: background .15s, height .15s, margin .15s; }
+.msg:hover .zh::after { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+.zh:hover::after, body.zooming .zh::after { background: var(--accent); height: 72px; margin-top: -36px; }
+.zh-tip { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 3; padding: 3px 10px; border-radius: 10px; background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; pointer-events: none; }
+@media (prefers-color-scheme: dark) { .zh-tip { color: #10151c; } }
+body.zooming { cursor: ew-resize; user-select: none; }
+body.zooming iframe { pointer-events: none; }
+@media (max-width: 860px) { .zh { display: none; } }
+
 /* 넓은 목록: 보낸 사람 | 제목 | 시각 */
 .pane-list { container-type: inline-size; container-name: list; }
 .col-h { display: none; }
