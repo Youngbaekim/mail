@@ -427,6 +427,7 @@ body.resizing iframe { pointer-events: none; }
 /* 복수 선택 */
 .item.sel { background: color-mix(in srgb, var(--accent-soft) 85%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
 .item.sel.active { background: var(--accent-soft); }
+.item.cursor { outline: 1.5px dashed var(--accent); outline-offset: -2px; }
 .multi { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 60vh; text-align: center; color: var(--soft); }
 .multi-n { font-size: 56px; font-weight: 800; color: var(--accent); line-height: 1; }
 .multi p { margin: 8px 0 18px; font-size: 15px; }

@@ -47,6 +47,8 @@ const state = {
   sel: null,          // 읽는 중인 스레드 key
   checked: new Set(), // 선택(복수)한 스레드 key
   anchor: null,       // Shift 범위 선택 기준
+  cursor: null,       // 키보드로 넓혀 가는 끝 (Shift·Ctrl+↑↓)
+  base: new Set(),    // 범위 선택 전에 Ctrl+클릭으로 모아 둔 선택 (범위와 합쳐 유지)
   thread: null,
   unread: {},
   labels: {},
@@ -422,7 +424,7 @@ function renderMulti() {
       <button class="btn-ghost" data-bulk="star">★ 별표</button>
       <button class="btn-ghost" data-bulk="clear">선택 해제</button>
     </div>
-    <p class="multi-tip">Ctrl+클릭: 하나씩 더하기·빼기 · Shift+클릭: 범위 선택 · Ctrl+A: 모두 · 오른쪽 클릭: 메뉴</p>
+    <p class="multi-tip">Ctrl+클릭: 하나씩 더하기·빼기 · Shift+클릭·Shift(Ctrl)+↑↓: 범위 넓히기 · Ctrl+A: 모두 · 오른쪽 클릭: 메뉴</p>
   </div>`;
 }
 
@@ -575,7 +577,7 @@ async function openThread(key, { scroll = false } = {}) {
   if (!t) return;
   state.sel = key;
   if (!state.checked.has(key) || state.checked.size > 1) { state.checked = new Set([key]); }
-  state.anchor = key;
+  state.anchor = key; state.cursor = key; state.base = new Set();
   $$('#list .item').forEach((li) => { li.classList.toggle('active', li.dataset.key === key); li.classList.toggle('sel', state.checked.has(li.dataset.key)); });
   if (scroll) $('#list .item.active')?.scrollIntoView({ block: 'nearest' });
   if (!cp.open || cp.float) $('#app').dataset.view = 'read';
@@ -1348,7 +1350,7 @@ async function deleteDraftItems(items) {
 }
 /** 임시메일함 목록에서 누르면 바로 쓰기 창으로 */
 async function openDraftItem(t) {
-  state.checked = new Set([t.key]); state.anchor = t.key; state.sel = t.key;
+  state.checked = new Set([t.key]); state.anchor = t.key; state.cursor = t.key; state.base = new Set(); state.sel = t.key;
   renderList();
   try {
     const th = await gm.getThread(t.account, t.id, { force: true });
@@ -1893,6 +1895,8 @@ function onKey(e) {
   if (typing || e.altKey) return;
   const k = e.key;
   if ((e.ctrlKey || e.metaKey) && (k === 'a' || k === 'A')) { e.preventDefault(); state.checked = new Set(state.items.map((t) => t.key)); renderList(); renderReader(); return; }
+  // Shift+↑↓ 또는 Ctrl+↑↓: 누른 메일(기준)부터 범위를 넓혀 누적 선택 (Ctrl+클릭으로 모아 둔 선택은 유지)
+  if ((e.shiftKey || e.ctrlKey || e.metaKey) && (k === 'ArrowDown' || k === 'ArrowUp')) { e.preventDefault(); extendSel(k === 'ArrowDown' ? 1 : -1); return; }
   if (e.ctrlKey || e.metaKey) return;
   const move = (d) => {
     const i = state.items.findIndex((x) => x.key === state.sel);
@@ -1912,6 +1916,25 @@ function onKey(e) {
   else if (k === 'r') { e.preventDefault(); openCompose({ mode: 'reply' }); }
   else if (k === 'a') { e.preventDefault(); openCompose({ mode: 'replyAll' }); }
   else if (k === 'f') { e.preventDefault(); openCompose({ mode: 'forward' }); }
+}
+
+/** 키보드 누적 선택: 기준(anchor) ~ 끝(cursor) 범위 + 앞서 Ctrl+클릭으로 모은 선택 */
+function extendSel(d) {
+  const keys = state.items.map((x) => x.key);
+  if (!keys.length) return;
+  let a = keys.indexOf(state.anchor);
+  if (a < 0) { a = Math.max(0, keys.indexOf(state.sel)); state.anchor = keys[a]; state.cursor = keys[a]; state.base = new Set(); }
+  let c = keys.indexOf(state.cursor);
+  if (c < 0) c = a;
+  const z = Math.max(0, Math.min(keys.length - 1, c + d));
+  state.cursor = keys[z];
+  state.checked = new Set([...state.base, ...keys.slice(Math.min(a, z), Math.max(a, z) + 1)]);
+  renderList(); renderReader();
+  const li = $(`#list .item[data-key="${CSS.escape(state.cursor)}"]`);
+  li?.classList.add('cursor');
+  li?.scrollIntoView({ block: 'nearest' });
+  // 목록 끝에 닿으면 다음 메일을 더 불러옴
+  if (d > 0 && z >= keys.length - 2 && !state.loading && Object.values(state.pages).some(Boolean)) loadList({ append: true });
 }
 
 /* ───────── 이벤트 연결 ───────── */
@@ -1981,7 +2004,8 @@ function bind() {
     if (e.ctrlKey || e.metaKey) {
       if (state.checked.size <= 1 && state.sel && !state.checked.size) state.checked.add(state.sel);
       state.checked.has(key) ? state.checked.delete(key) : state.checked.add(key);
-      state.anchor = key;
+      state.anchor = key; state.cursor = key;
+      state.base = new Set(state.checked); state.base.delete(key); // 이후 Shift·Ctrl+↑↓는 이 메일부터 넓히고, 모아 둔 선택은 유지
       renderList(); renderReader();
       return;
     }
@@ -1989,7 +2013,8 @@ function bind() {
       const keys = state.items.map((x) => x.key);
       const a = keys.indexOf(state.anchor), z = keys.indexOf(key);
       if (a >= 0 && z >= 0) {
-        state.checked = new Set(keys.slice(Math.min(a, z), Math.max(a, z) + 1));
+        state.checked = new Set([...state.base, ...keys.slice(Math.min(a, z), Math.max(a, z) + 1)]);
+        state.cursor = key;
         renderList(); renderReader();
         return;
       }
@@ -2002,7 +2027,7 @@ function bind() {
     const li = e.target.closest('.item'); if (!li) return;
     e.preventDefault();
     const key = li.dataset.key;
-    if (!state.checked.has(key)) { state.checked = new Set([key]); state.anchor = key; renderList(); if (state.sel !== key && state.checked.size <= 1) renderReader(); }
+    if (!state.checked.has(key)) { state.checked = new Set([key]); state.anchor = key; state.cursor = key; state.base = new Set(); renderList(); if (state.sel !== key && state.checked.size <= 1) renderReader(); }
     listMenu({ x: e.clientX, y: e.clientY });
   });
   $('#list').addEventListener('scroll', (e) => {
