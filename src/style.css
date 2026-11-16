@@ -363,6 +363,8 @@ button.acc-state.off:hover { outline: 1px solid var(--warn); }
 .zm-v { min-width: 44px; padding: 3px 4px; border-radius: 7px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--soft); }
 .zm-v:hover { background: var(--accent-soft); }
 .theme-tg { font-size: 17px; }
+.fs-chip { flex: none; padding: 3px 9px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.fs-chip:hover { background: var(--accent); color: #fff; }
 .read-head { container-type: inline-size; container-name: rh; overflow: hidden; }
 @container rh (max-width: 720px) { .zoom input[type='range'] { display: none; } }
 @container rh (max-width: 600px) { .zm-v { display: none; } .read-head .txt-btn { padding: 5px 8px; font-size: 12.5px; } .read-head .sep { margin: 0 1px; } }

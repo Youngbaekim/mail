@@ -53,7 +53,8 @@ const state = {
   expanded: new Set(pref.get('expanded', [])),
   showImages: pref.get('showImages', true),
   undoSec: pref.get('undoSec', 30),
-  zoom: pref.get('zoom', 100),
+  zoom: pref.get('zoom', 100),       // 글자 배율 (상단 바) — 틀 너비는 그대로, 글이 다시 줄바꿈
+  fscale: pref.get('fscale', 1),     // 창 배율 (본문 좌우 핸들) — 틀 전체가 비율 그대로 커짐
   prefetchN: pref.get('prefetchN', 200),
 };
 
@@ -465,9 +466,9 @@ function renderReader() {
         ${files.length ? `<div class="atts atts-top">${files.map((x) => attChip(m, x)).join('')}${files.length > 1 ? `<button class="btn-ghost btn-sm att-all" data-attall title="모든 첨부를 고른 폴더에 저장">⬇ 모두 받기 (${files.length})</button>` : ''}</div>` : ''}
         <div class="m-imgnote"></div>
         <div class="m-frame-wrap">
-          <i class="zh zh-l" data-zh="-1" title="끌어서 본문 확대·축소 (두 번 누르면 100%)"></i>
+          <i class="zh zh-l" data-zh="-1" title="끌어서 메일 창 전체 확대·축소 (두 번 누르면 원래 크기)"></i>
           <iframe class="m-frame" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" title="메일 본문"></iframe>
-          <i class="zh zh-r" data-zh="1" title="끌어서 본문 확대·축소 (두 번 누르면 100%)"></i>
+          <i class="zh zh-r" data-zh="1" title="끌어서 메일 창 전체 확대·축소 (두 번 누르면 원래 크기)"></i>
           <b class="zh-tip" hidden></b>
         </div>
       </div>
@@ -476,6 +477,7 @@ function renderReader() {
   const split = (k, label) => `<span class="split"><button class="btn-ghost" data-act="${k}">${label}</button><button class="btn-ghost sp-pop" data-popact="${k}" title="${label} — 새 창에서 쓰기 (메일을 보면서 작성)">${WIN_ICON}</button></span>`;
   h += `<div class="r-reply">${split('reply', '답장')}${split('replyAll', '전체 답장')}${split('forward', '전달')}</div>`;
   $('#reader').innerHTML = h;
+  applyZoom();
   $$('#reader .msg:not(.draft-msg)').forEach((el) => { if (!el.classList.contains('collapsed')) fillBody(el); });
 }
 
@@ -548,7 +550,7 @@ async function fillBody(el, showImages = state.showImages) {
     // 본문 실제 높이(배율 반영)에 맞춤 — scrollHeight는 틀 높이 이상으로만 커져 줄어들지 않으므로 사용하지 않음
     const fit = () => { frame.style.height = Math.max(60, Math.ceil(doc.body.getBoundingClientRect().height) + 12) + 'px'; };
     frame._fit = fit;
-    doc.documentElement.style.zoom = state.zoom / 100;
+    doc.documentElement.style.zoom = (state.zoom / 100) * state.fscale;
     fit();
     doc.addEventListener('wheel', onZoomWheel, { passive: false });
     try { new ResizeObserver(fit).observe(doc.body); } catch { /* 무시 */ }
@@ -715,9 +717,45 @@ function setZoom(z) {
   pref.set('zoom', state.zoom);
   $('#zoom-range').value = state.zoom;
   $('#zoom-val').textContent = `${state.zoom}%`;
-  $$('#reader .m-frame').forEach((f) => { const d = f.contentDocument; if (d) { d.documentElement.style.zoom = state.zoom / 100; f._fit?.(); setTimeout(() => f._fit?.(), 60); } });
+  applyZoom();
 }
-/** 본문 좌우 핸들: 바깥으로 끌면 확대, 안쪽으로 끌면 축소 (비율 그대로) */
+/**
+ * 두 배율 적용
+ *  · 글자 배율(상단 바): 틀 너비는 그대로, 글자만 커지고 다시 줄바꿈
+ *  · 창 배율(본문 좌우 핸들): 줄바꿈 없이 용지 전체가 비율 그대로 커짐 → 읽기 영역 너비도 함께 커짐(넘치면 가로 스크롤)
+ */
+function applyZoom() {
+  const reader = $('#reader');
+  const z = state.zoom / 100, sc = state.fscale;
+  if (!reader) return;
+  // 100% 기준 너비 재기
+  reader.style.width = ''; reader.style.maxWidth = '';
+  const frames = $$('#reader .m-frame');
+  frames.forEach((f) => { const d = f.contentDocument; if (d) d.documentElement.style.width = ''; });
+  const R0 = reader.offsetWidth;
+  const w = $('#reader .msg:not(.collapsed) .m-frame-wrap');
+  const W0 = w ? w.offsetWidth : Math.max(200, R0 - 68);
+  const chip = $('#fscale-chip');
+  if (chip) { chip.hidden = sc === 1; chip.textContent = `창 ${Math.round(sc * 100)}% ↺`; }
+  if (sc !== 1) {
+    reader.style.maxWidth = 'none';
+    reader.style.width = `${Math.round(W0 * sc + (R0 - W0))}px`;
+  }
+  frames.forEach((f) => {
+    const d = f.contentDocument;
+    if (!d) return;
+    d.documentElement.style.zoom = z * sc;
+    // 창 배율일 때는 본문 배치 너비를 100% 때와 같게 고정 → 줄바꿈 그대로
+    d.documentElement.style.width = sc === 1 ? '' : `${W0 / z}px`;
+    f._fit?.(); setTimeout(() => f._fit?.(), 60);
+  });
+}
+function setFrameScale(v) {
+  state.fscale = Math.max(0.6, Math.min(2, Math.round(v * 20) / 20));
+  pref.set('fscale', state.fscale);
+  applyZoom();
+}
+/** 본문 좌우 핸들: 바깥으로 끌면 메일 창 전체가 비율 그대로 커지고, 안쪽으로 끌면 작아짐 */
 function bindZoomHandles() {
   const reader = $('#reader');
   reader.addEventListener('pointerdown', (e) => {
@@ -727,14 +765,14 @@ function bindZoomHandles() {
     const wrap = h.closest('.m-frame-wrap');
     const tip = $('.zh-tip', wrap);
     const dir = Number(h.dataset.zh); // 오른쪽 +1, 왼쪽 -1
-    const startX = e.clientX, startZ = state.zoom, width = wrap.getBoundingClientRect().width || 600;
+    const startX = e.clientX, startS = state.fscale, width = wrap.getBoundingClientRect().width || 600;
     h.setPointerCapture(e.pointerId);
     document.body.classList.add('zooming');
     tip.hidden = false;
     const move = (ev) => {
       const dx = (ev.clientX - startX) * dir; // 바깥쪽으로 끈 거리
-      setZoom(startZ * (1 + (2 * dx) / width));
-      tip.textContent = `${state.zoom}%`;
+      setFrameScale(startS * (1 + (2 * dx) / width));
+      tip.textContent = `창 ${Math.round(state.fscale * 100)}%`;
     };
     const up = () => {
       h.removeEventListener('pointermove', move); h.removeEventListener('pointerup', up); h.removeEventListener('pointercancel', up);
@@ -743,7 +781,8 @@ function bindZoomHandles() {
     };
     h.addEventListener('pointermove', move); h.addEventListener('pointerup', up); h.addEventListener('pointercancel', up);
   });
-  reader.addEventListener('dblclick', (e) => { if (e.target.closest('.zh')) setZoom(100); });
+  reader.addEventListener('dblclick', (e) => { if (e.target.closest('.zh')) setFrameScale(1); });
+  window.addEventListener('resize', () => { if (state.fscale !== 1) applyZoom(); });
 }
 function onZoomWheel(e) {
   if (!e.ctrlKey) return;
@@ -1913,6 +1952,7 @@ function bind() {
   $('#zoom-range').oninput = (e) => setZoom(Number(e.target.value));
   bindZoomHandles();
   $('#zoom-val').onclick = () => setZoom(100);
+  $('#fscale-chip').onclick = () => setFrameScale(1);
   $('#read-wrap').addEventListener('wheel', onZoomWheel, { passive: false });
   setZoom(state.zoom);
   $('#btn-print').onclick = () => printThread();
