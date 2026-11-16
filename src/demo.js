@@ -188,6 +188,13 @@ export function demoBackend(email, method, path, q, body) {
   return Promise.reject(new Error('demo: ' + path));
 }
 
+// 점검용 주소록(학교 디렉터리 흉내)
+export const DEMO_PEOPLE = [
+  ['김남은', 'miracle524@ssu.ac.kr'], ['김남수', '1@ssu.ac.kr'], ['김남수', 'nskim@ssu.ac.kr'], ['김남수', '777@ssu.ac.kr'],
+  ['김남훈', 'knh2@ssu.ac.kr'], ['김남미', 'nammee@ssu.ac.kr'], ['김남숙', 'tbr211@ssu.ac.kr'], ['김남엽', 'namyup.kim@ssu.ac.kr'],
+  ['박지훈', 'jhpark@ssu.ac.kr'], ['Jane Doe', 'jane@example.com'],
+].map(([name, email]) => ({ name, email, photo: '', source: 'dir' }));
+
 export function initDemo() {
   seed();
   // 점검용: 새 메일 도착 흉내

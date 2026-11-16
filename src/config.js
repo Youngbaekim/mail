@@ -8,5 +8,13 @@ export const CLIENT_ID = '464114113553-h7i144oehp2besm28qk56cvjjsk8lt0r.apps.goo
 // + 필터 설정 권한(보낸 사람 차단)
 export const SCOPES = 'https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.settings.basic';
 
+// 주소록 검색 권한 (읽기 전용, 선택) — 내 연락처 · 기타 연락처 · 학교 디렉터리
+// 메일 권한과 따로 동의받음(없어도 메일은 그대로 동작)
+export const PEOPLE_SCOPES = [
+  'https://www.googleapis.com/auth/contacts.readonly',
+  'https://www.googleapis.com/auth/contacts.other.readonly',
+  'https://www.googleapis.com/auth/directory.readonly',
+];
+
 // 계정 표시 색 (추가 순서대로)
 export const ACCOUNT_COLORS = ['#2f6fd6', '#d9822b', '#2a9d6a', '#a24fc4'];

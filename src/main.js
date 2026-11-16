@@ -3,10 +3,11 @@ import './style.css';
 import { getTheme, setTheme, isDark } from './theme.js';
 import * as auth from './auth.js';
 import * as gm from './gmail.js';
+import * as people from './people.js';
 import * as cache from './cache.js';
 import { setupEditor, extractInline, toolbarHtml, paletteHtml, format, activeEditor, sanitize } from './editor.js';
 import { buildRaw, parseAddrList, validEmail, escHtml, textToHtml, htmlToText, b64ToBytes } from './mime.js';
-import { ACCOUNT_COLORS } from './config.js';
+import { ACCOUNT_COLORS, PEOPLE_SCOPES } from './config.js';
 
 const VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev';
 const PARAMS = new URLSearchParams(location.search);
@@ -1454,31 +1455,98 @@ function renderSendbar() {
 setInterval(() => { if (outbox.length) renderSendbar(); }, 500);
 window.addEventListener('beforeunload', (e) => { if (outbox.length || (cp.open && cp.dirty)) { e.preventDefault(); e.returnValue = ''; } });
 
-/* 받는 사람 자동 완성 */
-let sugTarget = null, sugIdx = 0;
-function suggest(input) {
-  const v = input.value;
-  const cut = Math.max(v.lastIndexOf(','), v.lastIndexOf(';'));
-  const term = v.slice(cut + 1).trim().toLowerCase();
+/* 받는 사람 자동 완성: 주고받은 기록 + 주소록(학교 디렉터리·내 연락처·기타 연락처) */
+let sugTarget = null, sugIdx = 0, sugSeq = 0, sugTimer = 0;
+const sugTerm = (v) => v.slice(Math.max(v.lastIndexOf(','), v.lastIndexOf(';')) + 1).trim();
+/** 이름 동그라미 글자: 한글 이름은 뒤 두 글자(김남수 → 남수), 영문은 머리글자 */
+function initials(name, email) {
+  const n = String(name || '').replace(/["']/g, '').trim();
+  if (/^[가-힣]{2,4}$/.test(n)) return n.length >= 3 ? n.slice(-2) : n; // 사람 이름
+  const w = n.split(/\s+/).filter(Boolean);
+  if (w.length && /^[가-힣]/.test(w[0])) return w[0].slice(0, 2); // '학사팀 박○○' → 학사
+  if (w.length) return (w[0][0] + (w[1]?.[0] || '')).toUpperCase();
+  return (email || '?')[0].toUpperCase();
+}
+function hlName(text, term) {
+  const i = text.toLowerCase().indexOf(term.toLowerCase());
+  if (!term || i < 0) return esc(text);
+  return `${esc(text.slice(0, i))}<b>${esc(text.slice(i, i + term.length))}</b>${esc(text.slice(i + term.length))}`;
+}
+const peopleAccs = () => connected().filter((a) => auth.hasPeople(a.email));
+const peopleMissing = () => connected().filter((a) => !auth.hasPeople(a.email) && !pref.get(`peopleSkip-${a.email}`, false));
+function rankSuggest(term, remote) {
+  const t = term.toLowerCase();
+  const map = new Map();
+  for (const [e, c] of contacts) if (e.includes(t) || (c.n || '').toLowerCase().includes(t)) map.set(e, { email: e, name: c.n || '', photo: '', c: c.c, src: 'mail' });
+  for (const r of remote) {
+    const x = map.get(r.email) || { email: r.email, name: '', photo: '', c: 0, src: r.source };
+    if (r.name && (!x.name || x.src === 'mail')) x.name = r.name;
+    if (r.photo && !x.photo) x.photo = r.photo;
+    if (x.src === 'mail') x.src = r.source;
+    map.set(r.email, x);
+  }
+  const score = (x) => Math.min(x.c, 50) * 2 + ((x.name || '').toLowerCase().startsWith(t) || x.email.startsWith(t) ? 6 : 0) + (x.src === 'dir' || x.src === 'contact' ? 1 : 0);
+  return [...map.values()].sort((a, b) => score(b) - score(a) || (a.name || a.email).localeCompare(b.name || b.email, 'ko')).slice(0, 12);
+}
+function renderSuggest(input, term, list) {
   const box = $('#suggest');
-  if (term.length < 1) { box.hidden = true; return; }
-  const hits = [...contacts.entries()].filter(([e, c]) => e.includes(term) || (c.n || '').toLowerCase().includes(term))
-    .sort((a, b) => b[1].c - a[1].c).slice(0, 8);
-  if (!hits.length) { box.hidden = true; return; }
-  sugTarget = input; sugIdx = 0;
-  box.innerHTML = hits.map(([e, c], i) => `<li data-e="${esc(e)}" data-n="${esc(c.n || '')}" class="${i ? '' : 'on'}">${esc(c.n || e)}${c.n ? `<small>${esc(e)}</small>` : ''}</li>`).join('');
+  const miss = peopleMissing();
+  if (!list.length && !miss.length) { box.hidden = true; return; }
+  sugTarget = input;
+  sugIdx = Math.min(sugIdx, Math.max(0, list.length - 1));
+  box.innerHTML = list.map((x, i) => `<li data-e="${esc(x.email)}" data-n="${esc(x.name)}" class="sug${i === sugIdx ? ' on' : ''}">
+      <span class="sug-av" style="background:${colorOf(x.email)}">${x.photo ? `<img src="${esc(x.photo)}" alt="" referrerpolicy="no-referrer" loading="lazy" onerror="this.remove()">` : ''}<i>${esc(initials(x.name, x.email))}</i></span>
+      <span class="sug-tx"><span class="sug-n">${hlName(x.name || x.email, term)}</span>${x.name ? `<small>${hlName(x.email, term)}</small>` : ''}</span></li>`).join('')
+    + (list.length ? '' : '<li class="sug-none">주고받은 기록에 없는 이름입니다</li>')
+    + miss.map((a) => `<li class="sug-enable" data-people="${esc(a.email)}" title="계정마다 한 번 동의(읽기 전용)">🔍 <b>${esc(accLabel(a))}</b> 주소록에서도 찾기 — 켜기<span class="sug-x" data-skip="${esc(a.email)}" title="다시 묻지 않기">✕</span></li>`).join('');
   const r = input.getBoundingClientRect();
-  box.style.left = `${Math.max(8, Math.min(r.left, innerWidth - 300))}px`;
+  box.style.left = `${Math.max(8, Math.min(r.left, innerWidth - 400))}px`;
   box.style.top = `${r.bottom + 4}px`;
+  box.style.maxHeight = `${Math.max(160, innerHeight - r.bottom - 16)}px`;
   box.hidden = false;
 }
-function pickSuggest(li) {
+function suggest(input) {
+  const term = sugTerm(input.value);
+  const box = $('#suggest');
+  clearTimeout(sugTimer);
+  const seq = ++sugSeq;
+  if (!term) { box.hidden = true; return; }
+  sugIdx = 0;
+  renderSuggest(input, term, rankSuggest(term, []));
+  const accsP = peopleAccs();
+  if (!accsP.length) return;
+  sugTimer = setTimeout(async () => {
+    const res = (await Promise.all(accsP.map((a) => people.search(a.email, term, auth.grantedScopes(a.email)).catch(() => [])))).flat();
+    if (seq !== sugSeq || sugTerm(input.value) !== term || document.activeElement !== input) return;
+    renderSuggest(input, term, rankSuggest(term, res));
+  }, 200);
+}
+async function enablePeople(email) {
+  $('#suggest').hidden = true;
+  try {
+    let ok;
+    try { ok = await auth.grantPeople(email); } catch (e) {
+      // 학교 관리자 정책으로 디렉터리 권한이 막혔으면 연락처만이라도
+      if (!/관리자|admin/i.test(e.message)) throw e;
+      ok = await auth.grantPeople(email, PEOPLE_SCOPES.slice(0, 2));
+      toast('학교 디렉터리 검색은 관리자 정책으로 막혀 있어, 연락처만 검색합니다.', 6000);
+    }
+    if (!ok) { toast(DESK ? '주소록 권한을 받지 못했습니다. 최신 설치판(1.2.0 이상)이 필요합니다.' : '주소록 권한 항목이 체크되지 않았습니다.', 6000); return; }
+    toast(`${email} 주소록 검색을 켰습니다.`);
+    if (sugTarget) { sugTarget.focus(); suggest(sugTarget); }
+  } catch (e) { toast(`주소록 연결 실패: ${e.message}`, 6000); }
+}
+function pickSuggest(li, ev) {
   const input = sugTarget;
   if (!input || !li) return;
+  if (ev?.target.closest?.('[data-skip]')) { pref.set(`peopleSkip-${li.dataset.people}`, true); suggest(input); return; }
+  if (li.dataset.people) { enablePeople(li.dataset.people); return; }
+  if (!li.dataset.e) return;
   const v = input.value;
   const cut = Math.max(v.lastIndexOf(','), v.lastIndexOf(';'));
   const addr = li.dataset.n ? `${li.dataset.n} <${li.dataset.e}>` : li.dataset.e;
   input.value = (cut >= 0 ? v.slice(0, cut + 1) + ' ' : '') + addr + ', ';
+  if (li.dataset.n) learn(addr, 1); // 고른 사람은 다음에 먼저
   $('#suggest').hidden = true;
   input.focus();
 }
@@ -1646,6 +1714,7 @@ async function openMenu(anchor) {
     ${mi('sig', '서명 만들기·고치기', { icon: '✍' })}
     ${mi('acc', '계정 설정 (이름·색·순서)', { icon: '👤' })}
     ${mi('blocked', '차단한 주소 (스팸 필터)', { icon: '⛔' })}
+    ${connected().map((a) => mi(`people:${a.email}`, `${auth.hasPeople(a.email) ? '☑' : '☐'} 주소록 검색 · ${esc(accLabel(a))}`, { icon: '🔍' })).join('')}
     ${mi('add', '계정 추가', { icon: '＋' })}
     <div class="pop-row">발송 취소 대기 <select id="m-undo" class="sel"><option value="0">끄기</option><option value="5">5초</option><option value="10">10초</option><option value="20">20초</option><option value="30">30초 (최대)</option></select></div>
     <hr>
@@ -1665,6 +1734,7 @@ async function openMenu(anchor) {
     if (k === 'sig') openSigSettings();
     if (k === 'acc') openAccSettings();
     if (k === 'blocked') openBlocked();
+    if (k.startsWith('people:')) { const em = k.slice(7); if (auth.hasPeople(em)) toast('이미 켜져 있습니다. 끄려면 Google 계정 → 보안 → 타사 앱에서 YB-Mail 권한을 조정하세요.', 6000); else { pref.set(`peopleSkip-${em}`, false); enablePeople(em); } }
     if (k === 'add') doAdd();
     if (k === 'prefetch') { bg.ranOnce = false; runPrefetch(); }
     if (k === 'wipe' && confirm('이 기기에 저장한 메일 사본을 모두 지울까요?\n(Gmail 서버의 메일은 그대로이며, 다시 미리 받습니다)')) { await cache.clearAll(); toast('기기 저장본을 지웠습니다.'); }
@@ -2182,16 +2252,18 @@ function bind() {
     el.addEventListener('keydown', (e) => {
       const box = $('#suggest');
       if (box.hidden) return;
-      const lis = $$('li', box);
+      const lis = $$('li.sug', box); // 키보드는 사람 목록만 (주소록 켜기 줄은 마우스로)
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
+        if (!lis.length) return;
         sugIdx = (sugIdx + (e.key === 'ArrowDown' ? 1 : -1) + lis.length) % lis.length;
+        lis[sugIdx].scrollIntoView({ block: 'nearest' });
         lis.forEach((li, i) => li.classList.toggle('on', i === sugIdx));
-      } else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); pickSuggest(lis[sugIdx]); }
+      } else if ((e.key === 'Enter' || e.key === 'Tab') && lis[sugIdx]) { e.preventDefault(); pickSuggest(lis[sugIdx]); }
     });
     el.addEventListener('blur', () => setTimeout(() => ($('#suggest').hidden = true), 200));
   }
-  $('#suggest').addEventListener('mousedown', (e) => { e.preventDefault(); pickSuggest(e.target.closest('li')); });
+  $('#suggest').addEventListener('mousedown', (e) => { e.preventDefault(); pickSuggest(e.target.closest('li'), e); });
 
   // 파일 끌어놓기 → 첨부 (편집기 위에 놓은 그림은 본문에 들어감)
   let dragN = 0;
@@ -2289,6 +2361,7 @@ async function boot() {
     gm.useBackend(demo.demoBackend);
     auth.demoSetup(demo.DEMO_ACCOUNTS);
     window.__ybCheck = checkNewMail;
+    people.useDemo((q) => demo.DEMO_PEOPLE.filter((p) => p.name.includes(q) || p.email.includes(q.toLowerCase())));
     afterConnect();
     return;
   }

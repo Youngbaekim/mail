@@ -1,7 +1,7 @@
 // Google 로그인(계정별 접근 토큰) — Google Identity Services 토큰 방식
 // · 서버 없이 브라우저에서만 동작: 토큰은 1시간짜리이며 이 기기에만 보관
 // · 계정을 여러 개 등록하고, 계정마다 따로 토큰을 받음(login_hint로 계정 지정)
-import { CLIENT_ID, SCOPES, ACCOUNT_COLORS } from './config.js';
+import { CLIENT_ID, SCOPES, ACCOUNT_COLORS, PEOPLE_SCOPES } from './config.js';
 
 // 점검용(?demo)은 따로 보관 → 실제 계정 목록과 섞이지 않음
 const P = new URLSearchParams(location.search).has('demo') ? 'ybm-demo-' : 'ybm-';
@@ -77,14 +77,15 @@ export function loadGis() {
 }
 
 /** 팝업으로 토큰 요청 — 반드시 클릭(사용자 동작) 안에서 호출해야 팝업이 차단되지 않음 */
-function requestToken(override) {
+function requestToken(override, scope = SCOPES) {
   return new Promise((resolve, reject) => {
     if (!window.google?.accounts?.oauth2) { reject(new Error('Google 로그인 준비 중입니다. 잠시 뒤 다시 누르세요.')); return; }
     const cid = clientId();
     if (!cid) { reject(new Error('클라이언트 ID가 설정되지 않았습니다')); return; }
     const client = google.accounts.oauth2.initTokenClient({
       client_id: cid,
-      scope: SCOPES,
+      scope,
+      include_granted_scopes: true, // 이미 받은 권한(메일·주소록)을 합친 토큰
       callback: (r) => {
         if (r.error) { reject(new Error(errText(r.error, r.error_description))); return; }
         if (!google.accounts.oauth2.hasGrantedAllScopes(r, ...SCOPES.split(' '))) {
@@ -167,6 +168,41 @@ export function reconnect(email, { force = false } = {}) {
   return p;
 }
 export const isReconnecting = (email) => pending.has(email);
+
+/* ───────── 주소록 검색 권한 (선택) ───────── */
+const ALL_PEOPLE = PEOPLE_SCOPES;
+/** 이 계정 토큰이 가진 권한 목록 */
+export function grantedScopes(email) {
+  const t = ls.get(K_TOK + email);
+  if (t?.t === 'demo') return [...SCOPES.split(' '), ...ALL_PEOPLE];
+  return String(t?.scope || '').split(' ').filter(Boolean);
+}
+export const hasPeople = (email) => { const g = grantedScopes(email); return ALL_PEOPLE.some((s) => g.includes(s)); };
+/** 주소록 검색 권한 동의 (계정별 한 번). 반드시 클릭 안에서 호출 */
+export async function grantPeople(email, scopes = ALL_PEOPLE) {
+  if (D) {
+    const r = await D.signIn(email, scopes);
+    saveToken(email, r);
+  } else {
+    const r = await new Promise((resolve, reject) => {
+      if (!window.google?.accounts?.oauth2) { reject(new Error('Google 로그인 준비 중입니다. 잠시 뒤 다시 누르세요.')); return; }
+      const client = google.accounts.oauth2.initTokenClient({
+        client_id: clientId(),
+        scope: [...SCOPES.split(' '), ...scopes].join(' '),
+        include_granted_scopes: true,
+        callback: (x) => (x.error ? reject(new Error(errText(x.error, x.error_description))) : resolve(x)),
+        error_callback: (e) => reject(new Error(e?.type === 'popup_closed' ? '로그인 창을 닫았습니다' : (e?.message || '동의 실패'))),
+      });
+      client.requestAccessToken({ prompt: 'consent', login_hint: email });
+    });
+    const who = await whoAmI(r.access_token);
+    if (who.emailAddress.toLowerCase() !== email) throw new Error(`다른 계정(${who.emailAddress})이 선택되었습니다. ${email} 계정을 골라 주세요.`);
+    if (!NEED.every((sc) => String(r.scope).split(' ').includes(sc))) throw new Error('메일 권한 항목도 체크해 주세요.');
+    saveToken(email, r);
+  }
+  listeners.forEach((f) => f());
+  return hasPeople(email);
+}
 
 /** 데스크톱: 프로그램에 연결 정보가 남아 있는데 목록에 없는 계정 되살리기 */
 export async function desktopRestore() {
