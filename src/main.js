@@ -797,6 +797,12 @@ async function printThread() {
   setTimeout(() => f.remove(), 60_000);
 }
 
+/** 새로고침 — 쓰는 중인 메일·발송 대기 메일이 있으면 확인 */
+function reloadApp() {
+  if ((cp.open && cp.dirty) || outbox.length) { if (!confirm('작성 중이거나 발송 대기 중인 메일이 있습니다. 그래도 새로고침할까요?')) return; cp.dirty = false; }
+  location.reload();
+}
+
 /* ───────── 밝게/어둡게 ───────── */
 function syncThemeIcon() {
   const b = $('#btn-theme');
@@ -1576,6 +1582,7 @@ async function openMenu(anchor) {
     <hr>
     ${!isStandalone() ? mi('install', installEvt ? '앱으로 설치 (바탕화면·작업표시줄)' : '앱으로 설치하는 방법', { icon: '⬇' }) : ''}
     ${DESK ? mi('autostart', `${deskInfo.autoStart ? '☑' : '☐'} Windows 시작할 때 자동 실행`, { icon: '🖥' }) : mi('cid', '클라이언트 ID 바꾸기', { icon: '🔑' })}
+    ${DESK ? mi('reload', '새로고침 (최신 버전 반영)', { icon: '↻', hint: 'F5' }) : ''}
     ${mi('update', `새 버전 확인 (v${VERSION}${DESK && deskInfo.version ? ` · 프로그램 ${deskInfo.version}` : ''})`, { icon: '⟳' })}`, async (k) => {
     if (k === 'notif') {
       if (notif.on && Notification.permission === 'granted') { notif.on = false; pref.set('notifOn', false); toast('새 메일 알림을 껐습니다.'); }
@@ -1589,6 +1596,7 @@ async function openMenu(anchor) {
     if (k === 'prefetch') { bg.ranOnce = false; runPrefetch(); }
     if (k === 'wipe' && confirm('이 기기에 저장한 메일 사본을 모두 지울까요?\n(Gmail 서버의 메일은 그대로이며, 다시 미리 받습니다)')) { await cache.clearAll(); toast('기기 저장본을 지웠습니다.'); }
     if (k === 'install') doInstall();
+    if (k === 'reload') reloadApp();
     if (k === 'autostart') { await DESK.setAutoStart(!deskInfo.autoStart); toast(!deskInfo.autoStart ? 'Windows를 시작할 때 YB-Mail이 트레이에서 자동 실행됩니다.' : '자동 실행을 껐습니다.'); }
     if (k === 'cid') { const v = prompt('OAuth 클라이언트 ID', auth.clientId()); if (v != null) { auth.setClientId(v); toast('저장했습니다. 계정을 다시 연결하세요.'); } }
     if (k === 'update') navigator.serviceWorker?.getRegistration().then((r) => r?.update()).then(() => toast('확인했습니다. 새 버전이 있으면 안내가 뜹니다.'));
@@ -1829,6 +1837,8 @@ function bindGutter(el, key, min, max, def) {
 
 /* ───────── 단축키 ───────── */
 function onKey(e) {
+  // 설치 프로그램에는 브라우저 메뉴가 없어 새로고침(F5·Ctrl+R)을 직접 처리
+  if (DESK && (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R')))) { e.preventDefault(); reloadApp(); return; }
   if ((e.ctrlKey || e.metaKey) && !e.altKey) {
     if (e.key === '=' || e.key === '+') { e.preventDefault(); setZoom(state.zoom + 10); return; }
     if (e.key === '-' || e.key === '_') { e.preventDefault(); setZoom(state.zoom - 10); return; }
