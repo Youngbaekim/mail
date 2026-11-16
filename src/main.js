@@ -195,8 +195,39 @@ function renderSide() {
   }
   $('#folders').innerHTML = h;
   document.title = total ? `(${total}) YB-Mail` : 'YB-Mail';
-  try { if (total) navigator.setAppBadge?.(total); else navigator.clearAppBadge?.(); } catch { /* 무시 */ }
-  DESK?.setBadge(total).catch(() => {});
+  updateBadge();
+}
+
+/* ───────── 작업표시줄 숫자: 창을 보지 않는 동안 새로 온 메일 수 (두 계정 합계) ───────── */
+var newMail = Number(pref.get('newMail', 0)) || 0;
+var shownBadge = -1;
+function viewing() { return document.hasFocus() && document.visibilityState === 'visible'; }
+function addNewMail(n) { if (n > 0 && !viewing()) { newMail += n; pref.set('newMail', newMail); updateBadge(); } }
+function clearNewMail() { if (newMail) { newMail = 0; pref.set('newMail', 0); } updateBadge(); }
+/** 숫자 그림 (A안: 남색 둥근 사각 + 흰 숫자 + 얇은 흰 테두리), px = 16·24·32 */
+function badgeImage(n, px) {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = px;
+  const c = cv.getContext('2d');
+  const s = px / 16;
+  const txt = n > 99 ? '99+' : String(n);
+  let fs = txt.length > 2 ? 8.2 : txt.length > 1 ? 10 : 11, tw;
+  do { c.font = `700 ${fs * s}px "Segoe UI", "Malgun Gothic", sans-serif`; tw = c.measureText(txt).width; fs -= 0.2; } while (tw + 3 * s > px - s && fs > 5);
+  const h = 13 * s, w = Math.min(px - s, Math.max(h, tw + 5 * s));
+  const x = px - w - 0.5 * s, y = px - h - 0.5 * s;
+  c.beginPath();
+  c.roundRect(x, y, w, h, 3.5 * s);
+  c.fillStyle = '#243E6B'; c.fill();
+  c.lineWidth = s; c.strokeStyle = 'rgba(255,255,255,.9)'; c.stroke();
+  c.fillStyle = '#fff'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(txt, x + w / 2, y + h / 2 + 0.6 * s);
+  return cv.toDataURL('image/png');
+}
+function updateBadge() {
+  if (CPWIN || newMail === shownBadge) return;
+  shownBadge = newMail;
+  if (DESK) { DESK.setBadge(newMail, newMail ? { 1: badgeImage(newMail, 16), 1.5: badgeImage(newMail, 24), 2: badgeImage(newMail, 32) } : null).catch(() => {}); return; }
+  try { if (newMail) navigator.setAppBadge?.(newMail); else navigator.clearAppBadge?.(); } catch { /* 무시 */ }
 }
 
 async function selectFolder(scope, label) {
@@ -1563,7 +1594,7 @@ async function enableNotif() {
 }
 function saveSeen() { pref.set('notifSeen', [...notif.seen].slice(-800)); }
 async function checkNewMail() {
-  if (notif.busy || !notif.on || CPWIN) return;
+  if (notif.busy || CPWIN) return; // 알림을 꺼도 새 메일 수(작업표시줄 숫자)는 셈
   notif.busy = true;
   try {
     for (const a of connected()) {
@@ -1573,10 +1604,11 @@ async function checkNewMail() {
       r.threads.forEach((t) => notif.seen.add(`${t.key}|${t.count}`));
       if (!notif.primed.has(a.email)) { notif.primed.add(a.email); continue; } // 첫 확인은 기록만
       if (!fresh.length) continue;
+      addNewMail(fresh.length);
       state.unread[a.email] = await gm.unreadCount(a.email, 'INBOX').catch(() => state.unread[a.email]);
       renderSide();
       if (state.folder.label === 'INBOX' && (state.folder.scope === 'all' || state.folder.scope === a.email)) loadList({ silent: true });
-      if (notifSupported() && Notification.permission === 'granted' && !(document.hasFocus() && document.visibilityState === 'visible')) {
+      if (notif.on && notifSupported() && Notification.permission === 'granted' && !(document.hasFocus() && document.visibilityState === 'visible')) {
         for (const t of fresh.slice(0, 3).reverse()) showMailNotif(a, t);
         if (fresh.length > 3) new Notification(`YB-Mail · ${accLabel(a)}`, { body: `새 메일 ${fresh.length}통이 왔습니다.`, icon: 'icons/icon-192.png', tag: `ybm-many-${a.email}` });
       }
@@ -2199,7 +2231,8 @@ function bind() {
   auth.onChange(() => { renderSide(); renderBanner(); });
   window.addEventListener('online', () => loadList({ silent: true }));
   window.addEventListener('offline', () => setSync('offline', '● 오프라인 (저장본 표시 중)'));
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && started && connected().length) { loadList({ silent: true }); refreshCounts(); } });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && started && connected().length) { loadList({ silent: true }); refreshCounts(); } if (viewing()) clearNewMail(); });
+  window.addEventListener('focus', () => { if (viewing()) clearNewMail(); }); // 창을 보면 새 메일 수 0
   setInterval(() => {
     if (document.visibilityState !== 'visible' || !started || state.loading) return;
     if (!connected().length) { renderBanner(); renderSide(); return; }
