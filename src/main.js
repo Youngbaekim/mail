@@ -1042,7 +1042,14 @@ function setCpFloat(f) {
   $('#cp-min').hidden = !f;
 }
 
-async function openCompose({ mode = 'new', msg = null, account, to = '', subject = '', body = '', snapshot = null } = {}) {
+/* ───────── 메일 쓰기 창 열기: 기본은 별도 창(팝업), 설정에서 '읽기 영역 안'으로 바꿀 수 있음 ───────── */
+const usePopup = () => !CPWIN && innerWidth > 860 && pref.get('cpMode', 'popup') === 'popup';
+function openCompose(opts = {}) {
+  if (usePopup()) return popOut(() => openComposeHere(opts));
+  return openComposeHere(opts);
+}
+
+async function openComposeHere({ mode = 'new', msg = null, account, to = '', subject = '', body = '', snapshot = null } = {}) {
   if (cp.open && cp.dirty) {
     $('#compose').classList.remove('min');
     const r = await askUnsaved();
@@ -1147,17 +1154,44 @@ function setSplit(on) {
 const drafts = new Map();
 window.__ybmTakeDraft = (id) => { const d = drafts.get(id); drafts.delete(id); return d; };
 window.__ybmQueueSend = (job) => queueSend(job);
+/** 쓰기 창을 창 닫기(X)로 닫았을 때: 내용을 받아 임시메일함에 자동 저장 */
+window.__ybmRescue = (snap) => { let copy; try { copy = structuredClone(snap); } catch { copy = { ...snap, files: [] }; } setTimeout(() => rescueDraft(copy), 0); };
+async function rescueDraft(snap) {
+  if (cp.open) { toast('닫은 쓰기 창의 내용이 있습니다.', 0, { label: '열기', run: () => openCompose({ snapshot: snap }) }); return; }
+  $('#compose').classList.add('prep');
+  try {
+    await openComposeHere({ snapshot: snap });
+    // 닫힌 창의 첨부파일은 읽을 수 없을 수 있음 → 읽히는 것만
+    const ok = [];
+    for (const f of cp.files) { try { await f.slice(0, 1).arrayBuffer(); ok.push(f); } catch { /* 제외 */ } }
+    const lost = cp.files.length - ok.length;
+    cp.files = ok;
+    const saved = await saveDraft({ quiet: true });
+    const keep = { ...snapshotCompose(), draftId: cp.draftId, draftAccount: cp.draftAccount };
+    cp.dirty = false;
+    await closeCompose(true);
+    if (saved) toast(`닫은 쓰기 창의 내용을 임시메일함에 저장했습니다.${lost ? ` (첨부 ${lost}개는 다시 넣어 주세요)` : ''}`, 9000, { label: '이어 쓰기', run: () => openCompose({ snapshot: keep }) });
+    else toast('닫은 쓰기 창의 내용을 저장하지 못했습니다.', 0, { label: '열기', run: () => openCompose({ snapshot: keep }) });
+  } finally { $('#compose').classList.remove('prep'); }
+}
 /** 지금 쓰는 메일을 새 창으로 떼어 냄 — 클릭 즉시 창을 열어야 팝업 차단을 피함 */
 async function popOut(prepare) {
   const id = Math.random().toString(36).slice(2, 10);
-  const w = window.open('', `ybm-cp-${id}`, 'popup=yes,width=860,height=900');
+  const b = pref.get('cpWin', null);
+  const feat = b ? `popup=yes,width=${b.w},height=${b.h},left=${b.x},top=${b.y}` : `popup=yes,width=860,height=900,left=${Math.max(0, screenX + outerWidth - 900)},top=${Math.max(0, screenY + 40)}`;
+  const w = window.open('', `ybm-cp-${id}`, feat);
   if (!w) { toast('팝업이 차단되었습니다. 주소창 오른쪽에서 팝업을 허용해 주세요.', 6000); return; }
   try { w.document.title = '메일 쓰기 – YB-Mail'; w.document.body.innerHTML = '<p style="font-family:sans-serif;color:#888;padding:20px">여는 중…</p>'; } catch { /* 무시 */ }
-  if (prepare) await prepare();
-  if (cp.quotePending) await cp.quotePending;
+  $('#compose').classList.add('prep'); // 본 창에는 잠깐도 보이지 않게
+  try {
+    if (prepare) await prepare();
+    if (cp.quotePending) await cp.quotePending;
+  } catch (e) { $('#compose').classList.remove('prep'); w.close(); fail(e, 'popout'); return; }
+  if (!cp.open) { $('#compose').classList.remove('prep'); w.close(); return; }
   drafts.set(id, snapshotCompose());
   cp.dirty = false;
-  closeCompose(true);
+  await closeCompose(true);
+  $('#compose').classList.remove('prep');
   w.location.href = `${location.pathname}?cpwin=${id}${DEMO ? '&demo' : ''}`;
 }
 /* ───────── 원문: 포함(on) · 직접 편집(edit) · 빼기(off) ───────── */
@@ -1353,7 +1387,7 @@ async function openDraftMsg(m, thread) {
     let body = (bodyEl ? bodyEl.innerHTML : d.body.innerHTML).replace(/(<br\s*\/?>\s*)+$/i, '');
     const others = (thread?.messages || []).filter((x) => x.id !== m.id && !x.labelIds.includes('DRAFT'));
     $('#toast').hidden = true;
-    await openCompose({ snapshot: {
+    await openComposeHere({ snapshot: {
       account: m.account, from: m.account, to: m.to, cc: m.cc, bcc: m.bcc, subject: m.subject, html: body || '<div><br></div>', sig: sigEl ? sigEl.innerHTML : '',
       mode: others.length ? 'reply' : 'new', threadId: others.length ? m.threadId : null, inReplyTo: m.inReplyTo, references: m.references,
       quoteHtml: quoteEl ? quoteEl.outerHTML : '', quoteText: quoteEl ? htmlToText(quoteEl.outerHTML) : '',
@@ -1384,6 +1418,10 @@ async function deleteDraftItems(items) {
 async function openDraftItem(t) {
   state.checked = new Set([t.key]); state.anchor = t.key; state.cursor = t.key; state.base = new Set(); state.sel = t.key;
   renderList();
+  if (usePopup()) { popOut(() => loadDraftItem(t)); return; }
+  return loadDraftItem(t);
+}
+async function loadDraftItem(t) {
   try {
     const th = await gm.getThread(t.account, t.id, { force: true });
     const drafts = th.messages.filter((m) => m.labelIds.includes('DRAFT'));
@@ -1453,7 +1491,17 @@ function renderSendbar() {
   }).join('');
 }
 setInterval(() => { if (outbox.length) renderSendbar(); }, 500);
-window.addEventListener('beforeunload', (e) => { if (outbox.length || (cp.open && cp.dirty)) { e.preventDefault(); e.returnValue = ''; } });
+window.addEventListener('beforeunload', (e) => {
+  const opener = CPWIN && window.opener && !window.opener.closed;
+  if (outbox.length || (cp.open && cp.dirty && !opener)) { e.preventDefault(); e.returnValue = ''; }
+});
+// 별도 쓰기 창: 창 닫기(X)로 닫히면 본 창이 내용을 임시 저장 / 창 크기·위치 기억
+if (CPWIN) {
+  window.addEventListener('pagehide', () => {
+    try { pref.set('cpWin', { w: outerWidth, h: outerHeight, x: screenX, y: screenY }); } catch { /* 무시 */ }
+    try { if (cp.open && cp.dirty && window.opener && !window.opener.closed) window.opener.__ybmRescue(snapshotCompose()); } catch { /* 무시 */ }
+  });
+}
 
 /* 받는 사람 자동 완성: 주고받은 기록 + 주소록(학교 디렉터리·내 연락처·기타 연락처) */
 let sugTarget = null, sugIdx = 0, sugSeq = 0, sugTimer = 0;
@@ -1711,6 +1759,7 @@ async function openMenu(anchor) {
     ${mi('img', `${state.showImages ? '☑' : '☐'} 메일 속 외부 그림 바로 표시`)}
     ${mi('notif', `${notif.on && notifSupported() && Notification.permission === 'granted' ? '☑' : '☐'} 새 메일 알림 (받은편지함)`)}
     <hr>
+    ${mi('cpmode', `${pref.get('cpMode', 'popup') === 'popup' ? '☑' : '☐'} 메일 쓰기는 별도 창으로 (끄면 읽기 영역 안에서)`, { icon: '🗗' })}
     ${mi('sig', '서명 만들기·고치기', { icon: '✍' })}
     ${mi('acc', '계정 설정 (이름·색·순서)', { icon: '👤' })}
     ${mi('blocked', '차단한 주소 (스팸 필터)', { icon: '⛔' })}
@@ -1739,6 +1788,7 @@ async function openMenu(anchor) {
     if (k === 'prefetch') { bg.ranOnce = false; runPrefetch(); }
     if (k === 'wipe' && confirm('이 기기에 저장한 메일 사본을 모두 지울까요?\n(Gmail 서버의 메일은 그대로이며, 다시 미리 받습니다)')) { await cache.clearAll(); toast('기기 저장본을 지웠습니다.'); }
     if (k === 'install') doInstall();
+    if (k === 'cpmode') { const v = pref.get('cpMode', 'popup') === 'popup' ? 'inline' : 'popup'; pref.set('cpMode', v); toast(v === 'popup' ? '메일 쓰기를 별도 창으로 엽니다.' : '메일 쓰기를 읽기 영역 안에서 엽니다.'); }
     if (k === 'reload') reloadApp();
     if (k === 'autostart') { await DESK.setAutoStart(!deskInfo.autoStart); toast(!deskInfo.autoStart ? 'Windows를 시작할 때 YB-Mail이 트레이에서 자동 실행됩니다.' : '자동 실행을 껐습니다.'); }
     if (k === 'cid') { const v = prompt('OAuth 클라이언트 ID', auth.clientId()); if (v != null) { auth.setClientId(v); toast('저장했습니다. 계정을 다시 연결하세요.'); } }
@@ -2069,7 +2119,7 @@ function bind() {
   $('#btn-side').onclick = () => document.body.classList.add('drawer');
   $('#btn-side-close').onclick = $('#scrim').onclick = () => document.body.classList.remove('drawer');
   $('#btn-compose').onclick = $('#fab').onclick = () => { document.body.classList.remove('drawer'); openCompose({ mode: 'new' }); };
-  $('#btn-compose-pop').onclick = () => { document.body.classList.remove('drawer'); popOut(() => openCompose({ mode: 'new' })); };
+  $('#btn-compose-pop').onclick = () => { document.body.classList.remove('drawer'); popOut(() => openComposeHere({ mode: 'new' })); };
   $('#cp-pop').onclick = (e) => { e.stopPropagation(); popOut(); };
   $('#btn-add-acc').onclick = () => doAdd();
   $('#zoom-in').onclick = () => setZoom(state.zoom + 10);
@@ -2144,7 +2194,7 @@ function bind() {
     const go = e.target.closest('[data-go="list"]');
     if (go) { $('#app').dataset.view = 'list'; return; }
     const pa = e.target.closest('[data-popact]');
-    if (pa) { const k = pa.dataset.popact; popOut(() => openCompose({ mode: k })); return; }
+    if (pa) { const k = pa.dataset.popact; popOut(() => openComposeHere({ mode: k })); return; }
     const bulk = e.target.closest('[data-bulk]');
     if (bulk) { const k = bulk.dataset.bulk; if (k === 'clear') { state.checked.clear(); renderList(); renderReader(); } else actOn(k, checkedItems()); return; }
     const a = e.target.closest('[data-act]');
@@ -2173,7 +2223,7 @@ function bind() {
       return;
     }
     const dr = e.target.closest('[data-draft]');
-    if (dr && m) { if (dr.dataset.draft === 'edit') openDraftMsg(m, state.thread); else deleteDraftMsg(m); return; }
+    if (dr && m) { if (dr.dataset.draft === 'edit') { const th = state.thread; if (usePopup()) popOut(() => openDraftMsg(m, th)); else openDraftMsg(m, th); } else deleteDraftMsg(m); return; }
     if (e.target.closest('[data-showimg]')) { fillBody(msgEl, true); return; }
     if (e.target.closest('[data-attall]') && m) { attSaveAll(m); return; }
     const att = e.target.closest('[data-att]');
@@ -2348,7 +2398,7 @@ async function boot() {
     if (DEMO) { const demo = await import('./demo.js'); demo.initDemo(); gm.useBackend(demo.demoBackend); }
     let snap = null;
     try { snap = window.opener?.__ybmTakeDraft?.(CPWIN) || null; } catch { /* 무시 */ }
-    await openCompose(snap ? { snapshot: snap } : { mode: 'new' });
+    await openComposeHere(snap ? { snapshot: snap } : { mode: 'new' });
     cp.dirty = !!snap && snap.mode !== 'new';
     auth.loadGis().catch(() => {});
     return;
@@ -2383,6 +2433,6 @@ async function boot() {
   auth.loadGis().catch((e) => { gateMsg(e.message); toast(e.message, 0); });
   registerSW();
   syncInstall();
-  if (new URLSearchParams(location.search).has('compose')) setTimeout(() => openCompose({ mode: 'new' }), 600);
+  if (new URLSearchParams(location.search).has('compose')) setTimeout(() => openComposeHere({ mode: 'new' }), 600);
 }
 boot();

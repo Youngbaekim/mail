@@ -418,6 +418,8 @@ body.zooming iframe { pointer-events: none; }
 .cp-quote-edit img { max-width: 100%; }
 .cp-sigwrap { margin-top: 10px; }
 
+.compose.prep { visibility: hidden !important; }
+
 /* 칸 너비 조절 */
 .gutter { position: absolute; top: 0; bottom: 0; right: -4px; width: 8px; z-index: 5; cursor: col-resize; }
 .gutter:hover, body.resizing .gutter { background: color-mix(in srgb, var(--accent) 25%, transparent); }
