@@ -1,6 +1,6 @@
 // YB-Mail 서비스 워커 — 인터넷이 없어도 앱 화면이 열리도록 앱 파일만 기기에 보관
 // 메일 내용·Google 로그인 요청은 보관하지 않음(항상 Gmail에서 새로 받음)
-const VERSION = 'v0.7.3';
+const VERSION = 'v0.8.0';
 const SHELL = `ybm-shell-${VERSION}`;
 const EXT = 'ybm-ext-v1'; // 글꼴(외부 파일)
 const SCOPE = self.registration.scope; // https://…/mail/

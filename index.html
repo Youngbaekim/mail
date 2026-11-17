@@ -46,9 +46,34 @@
         <button class="icon-btn" id="btn-refresh" title="새로 고침 (F5 대신)" aria-label="새로 고침">⟳</button>
       </header>
       <div class="filters">
-        <input id="search" class="search" type="search" placeholder="메일 검색 (Gmail 검색어 가능)" enterkeyhint="search" />
+        <input id="search" class="search" type="search" placeholder="메일 검색 — 단어 일부·띄어쓰기 무시 (PC 저장본)" enterkeyhint="search" />
+        <button class="chip" id="btn-adv" title="검색 조건 (포함·제외·보낸 사람·기간 …)">조건 ▾</button>
         <button class="chip" id="chip-unread" title="읽지 않은 메일만">안읽음</button>
       </div>
+      <div id="search-adv" class="search-adv" hidden>
+        <div class="sa-grid">
+          <label>포함<input id="sa-text" placeholder="모든 단어 (일부만 써도 됨)" /></label>
+          <label>정확한 문구<input id="sa-phrase" placeholder='예: 검토 요청' /></label>
+          <label>제외<input id="sa-exclude" placeholder="예: 광고 뉴스레터 (띄어 쓰면 여러 개)" /></label>
+          <label>보낸 사람<input id="sa-from" placeholder="이름 또는 주소 일부" /></label>
+          <label>받는 사람<input id="sa-to" placeholder="이름 또는 주소 일부" /></label>
+          <div class="sa-row"><span>찾을 곳</span>
+            <label class="sa-rb"><input type="radio" name="sa-where" value="all" checked>제목+본문</label>
+            <label class="sa-rb"><input type="radio" name="sa-where" value="subject">제목만</label></div>
+          <div class="sa-row"><span>기간</span>
+            <select id="sa-period" class="sel"><option value="">전체</option><option value="7d">최근 1주</option><option value="1m">최근 1개월</option><option value="3m">최근 3개월</option><option value="1y">최근 1년</option><option value="custom">직접 지정</option></select>
+            <span id="sa-dates" class="sa-dates" hidden><input type="date" id="sa-after"> ~ <input type="date" id="sa-before"></span></div>
+          <div class="sa-row"><span>상태</span>
+            <label class="sa-rb"><input type="checkbox" id="sa-attach">첨부 있음</label>
+            <label class="sa-rb"><input type="checkbox" id="sa-unread">안읽음</label>
+            <label class="sa-rb"><input type="checkbox" id="sa-starred">별표</label></div>
+          <div class="sa-row"><span>범위</span>
+            <label class="sa-rb"><input type="radio" name="sa-scope" value="folder" checked>지금 편지함</label>
+            <label class="sa-rb"><input type="radio" name="sa-scope" value="all">전체 메일함 (스팸·휴지통 제외)</label></div>
+        </div>
+        <div class="sa-foot"><span class="sa-tip">단어 일부·띄어쓰기 무시는 PC에 저장된 메일에서, 오래된 메일은 Gmail에서 온전한 단어로 찾아 함께 보여 줍니다.</span><button class="btn-ghost btn-sm" id="sa-reset">조건 지우기</button><button class="btn-primary btn-sm" id="sa-go">검색</button></div>
+      </div>
+      <div id="search-chips" class="search-chips" hidden></div>
       <div id="banner" class="banner" hidden></div>
       <div id="notif-ask" class="notif-ask" hidden><span>🔔 받은편지함에 새 메일이 오면 화면 오른쪽 아래에 알려 드릴까요?</span><button class="btn-primary btn-sm" id="notif-yes">알림 켜기</button><button class="btn-ghost btn-sm" id="notif-no">나중에</button></div>
       <ul id="list" class="list"></ul>

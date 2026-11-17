@@ -5,6 +5,7 @@ import * as auth from './auth.js';
 import * as gm from './gmail.js';
 import * as people from './people.js';
 import * as cache from './cache.js';
+import * as srch from './search.js';
 import { setupEditor, extractInline, toolbarHtml, paletteHtml, format, activeEditor, sanitize } from './editor.js';
 import { buildRaw, parseAddrList, validEmail, escHtml, textToHtml, htmlToText, b64ToBytes } from './mime.js';
 import { ACCOUNT_COLORS, PEOPLE_SCOPES } from './config.js';
@@ -40,7 +41,7 @@ const ALL_MAIN = ['INBOX', 'STARRED', 'DRAFT', 'SENT', 'SPAM'];
 const state = {
   folder: pref.get('folder', { scope: 'all', label: 'INBOX' }),
   q: '',
-  unreadOnly: false,
+  search: srch.emptySearch(), // 검색 조건 (검색창 = '포함')
   items: [],
   pages: {},          // email → 다음 쪽 토큰(null이면 끝)
   loading: false,
@@ -246,12 +247,68 @@ async function selectFolder(scope, label) {
   renderReader();
   // 기기 저장본으로 먼저 보여 주고, 서버에서 새로 확인
   const seq = ++state.loadSeq;
-  const cached = !state.q && !state.unreadOnly ? await cache.getList(folderKey()) : null;
+  const cached = !srch.isActive(state.search) ? await cache.getList(folderKey()) : null;
   if (seq !== state.loadSeq) return;
   state.items = (cached || []).filter((t) => accs().some((a) => a.email === t.account));
   state.pages = {};
   renderList();
   loadList({ silent: state.items.length > 0 });
+}
+
+/* ───────── 검색 조건: 펼침판 + 칩 ───────── */
+function renderSearchChips() {
+  const box = $('#search-chips');
+  if (!box) return;
+  const c = srch.chips(state.search);
+  box.hidden = !c.length;
+  const info = state.searchInfo ? `<span class="sc-info">결과 ${state.items.length}건${state.searchInfo.local ? ` · PC 저장본 부분 일치 포함` : ''}</span>` : '';
+  box.innerHTML = c.map(([k, t]) => `<button class="sc" data-sc="${k}" title="이 조건 빼기">${esc(t)} <b>✕</b></button>`).join('') +
+    (c.length > 1 ? '<button class="sc sc-all" data-sc="*">모두 지우기</button>' : '') + info;
+}
+/** 조건 → 화면 입력칸 */
+function syncSearchUI() {
+  const s = state.search, P = $('#search-adv');
+  $('#search').value = s.text;
+  if (P) {
+    $('#sa-text', P).value = s.text; $('#sa-phrase', P).value = s.phrase; $('#sa-exclude', P).value = s.exclude;
+    $('#sa-from', P).value = s.from; $('#sa-to', P).value = s.to;
+    $$('[name="sa-where"]', P).forEach((r) => (r.checked = r.value === s.where));
+    $('#sa-period', P).value = s.period; $('#sa-after', P).value = s.after; $('#sa-before', P).value = s.before;
+    $('#sa-dates', P).hidden = s.period !== 'custom';
+    $('#sa-attach', P).checked = s.attach; $('#sa-unread', P).checked = s.unread; $('#sa-starred', P).checked = s.starred;
+    $$('[name="sa-scope"]', P).forEach((r) => (r.checked = r.value === s.scope));
+  }
+  $('#btn-adv').classList.toggle('active', srch.isActive(state.search) && !srch.chips(state.search).every(([k]) => k === 'text'));
+  renderSearchChips();
+}
+/** 화면 입력칸 → 조건 */
+function readSearchUI() {
+  const P = $('#search-adv');
+  Object.assign(state.search, {
+    text: $('#sa-text', P).value, phrase: $('#sa-phrase', P).value, exclude: $('#sa-exclude', P).value,
+    from: $('#sa-from', P).value, to: $('#sa-to', P).value,
+    where: $('[name="sa-where"]:checked', P)?.value || 'all',
+    period: $('#sa-period', P).value, after: $('#sa-after', P).value, before: $('#sa-before', P).value,
+    attach: $('#sa-attach', P).checked, unread: $('#sa-unread', P).checked, starred: $('#sa-starred', P).checked,
+    scope: $('[name="sa-scope"]:checked', P)?.value || 'folder',
+  });
+}
+function clearSearch() { state.search = srch.emptySearch(); syncSearchUI(); loadList(); }
+function bindSearchPanel() {
+  const P = $('#search-adv');
+  $('#btn-adv').onclick = () => { P.hidden = !P.hidden; syncSearchUI(); if (!P.hidden) $('#sa-text', P).focus(); };
+  $('#sa-period', P).onchange = () => { $('#sa-dates', P).hidden = $('#sa-period', P).value !== 'custom'; };
+  $('#sa-go', P).onclick = () => { readSearchUI(); P.hidden = true; syncSearchUI(); loadList(); };
+  $('#sa-reset', P).onclick = () => { P.hidden = true; clearSearch(); };
+  P.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); $('#sa-go', P).click(); } if (e.key === 'Escape') { e.stopPropagation(); P.hidden = true; } });
+  $('#search-chips').onclick = (e) => {
+    const b = e.target.closest('[data-sc]'); if (!b) return;
+    const k = b.dataset.sc, d = srch.emptySearch();
+    if (k === '*') { clearSearch(); return; }
+    if (k === 'period') { state.search.period = ''; state.search.after = ''; state.search.before = ''; }
+    else state.search[k] = d[k];
+    syncSearchUI(); loadList();
+  };
 }
 
 /* ───────── 2열: 목록 ───────── */
@@ -271,14 +328,15 @@ function listTitle() {
 
 function renderList() {
   $('#list-title').textContent = listTitle();
-  $('#chip-unread').classList.toggle('active', state.unreadOnly);
+  $('#chip-unread').classList.toggle('active', state.search.unread);
+  renderSearchChips();
   const ul = $('#list');
   if (state.loading && !state.items.length) {
     ul.innerHTML = Array.from({ length: 7 }, () => '<li class="skeleton"><i style="width:40%"></i><i style="width:85%"></i><i style="width:65%"></i></li>').join('');
     return;
   }
   if (!state.items.length) {
-    ul.innerHTML = `<li class="empty">${!connected().length ? '연결된 계정이 없습니다.' : state.q || state.unreadOnly ? '조건에 맞는 메일이 없습니다.' : '메일이 없습니다.'}</li>`;
+    ul.innerHTML = `<li class="empty">${!connected().length ? '연결된 계정이 없습니다.' : srch.isActive(state.search) ? '조건에 맞는 메일이 없습니다.<br><small>PC에 저장된 메일은 단어 일부(예: para)로도, 오래된 메일은 온전한 단어로 찾습니다.</small>' : '메일이 없습니다.'}</li>`;
     return;
   }
   const multi = state.folder.scope === 'all';
@@ -310,9 +368,10 @@ function renderList() {
 }
 
 function query() {
-  const q = [state.q.trim(), state.unreadOnly ? 'is:unread' : ''].filter(Boolean).join(' ');
+  const q = srch.gmailQuery(state.search);
   const label = state.folder.label;
-  return { labelIds: label === 'ALL' ? undefined : [label], q };
+  const wide = srch.isActive(state.search) && state.search.scope === 'all';
+  return { labelIds: label === 'ALL' || wide ? undefined : [label], q };
 }
 
 async function loadList({ append = false, silent = false } = {}) {
@@ -324,11 +383,17 @@ async function loadList({ append = false, silent = false } = {}) {
   if (!silent) renderList();
   if (!syncLock) setSync('pending', '● 확인 중…');
   const { labelIds, q } = query();
+  // 검색 중이면 PC 저장본에서 부분 일치(띄어쓰기 무시)로도 찾아 서버 결과와 합침
+  const searching = srch.isActive(state.search);
+  const localP = searching && !append
+    ? cache.allThreads().then((recs) => srch.localSearch(recs, state.search, { accounts: new Set((f.scope === 'all' ? accs() : accs().filter((a) => a.email === f.scope)).map((a) => a.email)), label: f.label })).catch(() => [])
+    : Promise.resolve([]);
   const res = await Promise.allSettled(targets.map(async (a) => {
     if (append && !state.pages[a.email]) return null;
     const r = await gm.listThreads(a.email, { labelIds, q, pageToken: append ? state.pages[a.email] : undefined });
     return { email: a.email, ...r };
   }));
+  const localHits = await localP;
   if (seq !== state.loadSeq) return;
   state.loading = false;
   let err = 0;
@@ -353,15 +418,18 @@ async function loadList({ append = false, silent = false } = {}) {
   }
   // 연결이 끊긴 계정의 저장본은 그대로 보여 줌
   if (!append) for (const a of accs()) if (!targets.some((x) => x.email === a.email) && (f.scope === 'all' || f.scope === a.email)) keep.push(...state.items.filter((t) => t.account === a.email));
+  // 검색: 저장본 부분 일치 결과 합치기
+  if (localHits.length) { const have = new Set(keep.map((t) => t.key)); keep.push(...localHits.filter((t) => !have.has(t.key))); }
+  state.searchInfo = searching ? { local: localHits.length } : null;
   // '안읽음'만 보기: 지금 읽고 있는 메일은 읽음 처리돼도 목록에서 빼지 않음
-  if (state.unreadOnly && state.sel && !keep.some((t) => t.key === state.sel)) { const cur = state.items.find((t) => t.key === state.sel); if (cur) keep.push(cur); }
+  if (state.search.unread && state.sel && !keep.some((t) => t.key === state.sel)) { const cur = state.items.find((t) => t.key === state.sel); if (cur) keep.push(cur); }
   const uniq = new Map(keep.map((t) => [t.key, t]));
   state.items = [...uniq.values()].sort((a, b) => b.date - a.date);
   state.pages = pages;
   for (const k of [...state.checked]) if (!uniq.has(k)) state.checked.delete(k);
   renderList();
   renderBanner();
-  if (!q && !append) cache.putList(folderKey(f), state.items);
+  if (!searching && !append) cache.putList(folderKey(f), state.items);
   queueVisible();
   if (syncLock) return;
   if (!navigator.onLine) setSync('offline', '● 오프라인 (저장본 표시 중)');
@@ -657,7 +725,7 @@ function leavesFolder(kind, t) {
   if (kind === 'spam') return L !== 'SPAM';
   if (kind === 'notspam') return L === 'SPAM';
   if (kind === 'unstar') return L === 'STARRED';
-  if (kind === 'unread' || kind === 'read') return state.unreadOnly && kind === 'read';
+  if (kind === 'unread' || kind === 'read') return state.search.unread && kind === 'read';
   if (kind.startsWith('label:')) return false;
   return false;
 }
@@ -1918,7 +1986,7 @@ function listMenu(pt) {
     if (k === 'open') openThread(one.key);
     else if (['reply', 'replyAll', 'forward'].includes(k)) { if (state.sel !== one.key) await openThread(one.key); openCompose({ mode: k }); }
     else if (k === 'label') labelMenu(pt, items, labels);
-    else if (k === 'fromAll' && sender) { $('#search').value = `from:${sender.email}`; state.q = $('#search').value; loadList(); }
+    else if (k === 'fromAll' && sender) { state.search = { ...srch.emptySearch(), from: sender.email }; syncSearchUI(); loadList(); }
     else if (k === 'newTo' && sender) openCompose({ mode: 'new', account: one.account, to: sender.name ? `${sender.name} <${sender.email}>` : sender.email });
     else if (k === 'copyAddr' && sender) { await navigator.clipboard.writeText(sender.email).catch(() => {}); toast(`복사했습니다: ${sender.email}`); }
     else if (k === 'eml') saveEml(one);
@@ -2163,9 +2231,10 @@ function bind() {
   $('#btn-menu').onclick = (e) => ($('#pop').hidden ? openMenu(e.currentTarget) : closePop());
   $('#btn-refresh').onclick = () => { loadList({ silent: !!state.items.length }); refreshCounts(); };
   let qTimer;
-  $('#search').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(() => { state.q = $('#search').value; loadList(); }, 450); });
-  $('#search').addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(qTimer); state.q = $('#search').value; loadList(); } });
-  $('#chip-unread').onclick = () => { state.unreadOnly = !state.unreadOnly; loadList(); };
+  $('#search').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(() => { state.search.text = $('#search').value; syncSearchUI(); loadList(); }, 450); });
+  $('#search').addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(qTimer); state.search.text = $('#search').value; syncSearchUI(); loadList(); } if (e.key === 'Escape' && srch.isActive(state.search)) { e.preventDefault(); clearSearch(); } });
+  $('#chip-unread').onclick = () => { state.search.unread = !state.search.unread; syncSearchUI(); loadList(); };
+  bindSearchPanel();
 
   // 목록: 클릭·Ctrl+클릭·Shift+클릭·오른쪽 클릭
   $('#list').addEventListener('mousedown', (e) => { if (e.shiftKey) e.preventDefault(); }); // 글자 선택 방지

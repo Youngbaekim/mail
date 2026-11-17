@@ -82,3 +82,6 @@ export async function persist() {
 export async function usage() {
   try { const e = await navigator.storage.estimate(); return e.usage || 0; } catch { return 0; }
 }
+
+/** 저장된 스레드 전부 (검색용) */
+export const allThreads = () => tx('threads', 'readonly', (s) => s.getAll()).then((a) => a || []);
