@@ -879,6 +879,19 @@ function reloadApp() {
   location.reload();
 }
 
+/* ───────── 쓰기 화면 확대·축소 (Ctrl+휠, Ctrl +/−/0) — 화면 표시만, 보내는 메일 글자 크기는 그대로 ───────── */
+let cpZoom = pref.get('cpZoom', 100);
+function setCpZoom(z) {
+  cpZoom = Math.max(60, Math.min(200, Math.round(z / 5) * 5));
+  pref.set('cpZoom', cpZoom);
+  const body = $('.cp-body');
+  if (body) body.style.zoom = cpZoom / 100;
+  const chip = $('#cp-zchip');
+  if (chip) { chip.hidden = cpZoom === 100; chip.textContent = `${cpZoom}% ↺`; }
+  edMain?.hide(); edSig?.hide();
+}
+const inCompose = (t) => cp.open && !$('#compose').hidden && ($('#compose').contains(t) || CPWIN);
+
 /* ───────── 밝게/어둡게 ───────── */
 function syncThemeIcon() {
   const b = $('#btn-theme');
@@ -2037,9 +2050,11 @@ function onKey(e) {
   // 설치 프로그램에는 브라우저 메뉴가 없어 새로고침(F5·Ctrl+R)을 직접 처리
   if (DESK && (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R')))) { e.preventDefault(); reloadApp(); return; }
   if ((e.ctrlKey || e.metaKey) && !e.altKey) {
-    if (e.key === '=' || e.key === '+') { e.preventDefault(); setZoom(state.zoom + 10); return; }
-    if (e.key === '-' || e.key === '_') { e.preventDefault(); setZoom(state.zoom - 10); return; }
-    if (e.key === '0') { e.preventDefault(); setZoom(100); return; }
+    // 쓰기 화면 안에서는 쓰기 화면 배율, 그 밖에서는 메일 본문 배율
+    const cz = inCompose(e.target);
+    if (e.key === '=' || e.key === '+') { e.preventDefault(); cz ? setCpZoom(cpZoom + 10) : setZoom(state.zoom + 10); return; }
+    if (e.key === '-' || e.key === '_') { e.preventDefault(); cz ? setCpZoom(cpZoom - 10) : setZoom(state.zoom - 10); return; }
+    if (e.key === '0') { e.preventDefault(); cz ? setCpZoom(100) : setZoom(100); return; }
     if ((e.key === 'p' || e.key === 'P') && state.thread && !(cp.open && !cp.float)) { e.preventDefault(); printThread(); return; }
   }
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
@@ -2255,6 +2270,9 @@ function bind() {
   edMain = setupEditor($('#cp-editor'), { onFiles: addFiles });
   edSig = setupEditor($('#cp-sig'), { onFiles: () => toast('서명에는 그림만 넣을 수 있습니다.') });
   $('#cp-sig').addEventListener('input', syncSigBox);
+  $('#compose').addEventListener('wheel', (e) => { if (!e.ctrlKey) return; e.preventDefault(); setCpZoom(cpZoom + (e.deltaY < 0 ? 10 : -10)); }, { passive: false });
+  $('#cp-zchip').onclick = (e) => { e.stopPropagation(); setCpZoom(100); };
+  setCpZoom(cpZoom);
   $('#cp-tools').innerHTML = toolbarHtml();
   bindToolbar($('#cp-tools'), cpEditor);
   $('#cp-draft').onclick = () => saveDraft();

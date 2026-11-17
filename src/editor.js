@@ -135,11 +135,12 @@ export function setupEditor(el, { onFiles } = {}) {
     if (!c || !sel) return;
     e.preventDefault();
     const startX = e.clientX, startW = sel.getBoundingClientRect().width;
+    const k = sel.offsetWidth ? startW / sel.offsetWidth : 1; // 쓰기 화면 배율(확대·축소) 보정
     const sign = c.includes('w') ? -1 : 1;
     const maxW = el.clientWidth - 8;
     const move = (ev) => {
-      const w = Math.max(40, Math.min(maxW, startW + sign * (ev.clientX - startX)));
-      sel.style.width = `${Math.round(w)}px`;
+      const w = Math.max(40 * k, Math.min(maxW * k, startW + sign * (ev.clientX - startX)));
+      sel.style.width = `${Math.round(w / k)}px`;
       sel.style.height = 'auto';
       sel.removeAttribute('width'); sel.removeAttribute('height');
       place();
