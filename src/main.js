@@ -142,8 +142,10 @@ setInterval(() => {
 }, 10_000);
 
 /* ───────── 팝업 메뉴 (우클릭 등) ───────── */
+let popOpener = null; // 메뉴를 연 단추 (그 단추를 다시 누른 것은 '바깥 클릭'으로 보지 않음)
 function showPop(at, html, onPick) {
   const p = $('#pop');
+  popOpener = at instanceof Element ? at : null;
   p.innerHTML = html;
   p.hidden = false;
   const w = p.offsetWidth, h = p.offsetHeight;
@@ -159,7 +161,7 @@ function showPop(at, html, onPick) {
     onPick?.(b.dataset.k, b);
   };
 }
-const closePop = () => ($('#pop').hidden = true);
+const closePop = () => { $('#pop').hidden = true; popOpener = null; };
 const mi = (k, label, { icon = '', dis = false, cls = '', hint = '' } = {}) => `<button data-k="${k}" class="${cls}"${dis ? ' disabled' : ''}><span class="pi">${icon}</span>${label}${hint ? `<span class="k">${hint}</span>` : ''}</button>`;
 
 /* ───────── 1열: 편지함 ───────── */
@@ -587,6 +589,7 @@ async function fillBody(el, showImages = state.showImages) {
     doc.documentElement.style.zoom = (state.zoom / 100) * state.fscale;
     fit();
     doc.addEventListener('wheel', onZoomWheel, { passive: false });
+    doc.addEventListener('pointerdown', () => { if (!$('#pop').hidden) closePop(); });
     try { new ResizeObserver(fit).observe(doc.body); } catch { /* 무시 */ }
     doc.querySelectorAll('img').forEach((im) => im.addEventListener('load', fit));
     doc.querySelectorAll('details').forEach((dt) => dt.addEventListener('toggle', fit));
@@ -2030,6 +2033,7 @@ function bindGutter(el, key, min, max, def) {
 
 /* ───────── 단축키 ───────── */
 function onKey(e) {
+  if (e.key === 'Escape' && !$('#pop').hidden) { e.preventDefault(); closePop(); return; }
   // 설치 프로그램에는 브라우저 메뉴가 없어 새로고침(F5·Ctrl+R)을 직접 처리
   if (DESK && (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R')))) { e.preventDefault(); reloadApp(); return; }
   if ((e.ctrlKey || e.metaKey) && !e.altKey) {
@@ -2110,12 +2114,16 @@ function bind() {
   document.addEventListener('click', (e) => {
     const r = e.target.closest('[data-reconnect]');
     if (r) { e.preventDefault(); doReconnect(r.dataset.reconnect); }
-    if (!$('#pop').hidden && !e.target.closest('#pop, #btn-menu, [data-mact="more"], .att, [data-pal]')) closePop();
+    // 메뉴 바깥 아무 곳이나 누르면 닫힘 (방금 메뉴를 연 단추는 제외)
+    if (!$('#pop').hidden && !e.target.closest('#pop') && !(popOpener && popOpener.contains(e.target))) closePop();
     if (!$('#suggest').hidden && !e.target.closest('#suggest')) $('#suggest').hidden = true;
     const cancel = e.target.closest('[data-cancel]');
     if (cancel) cancelSend(cancel.dataset.cancel);
   });
   document.addEventListener('contextmenu', (e) => { if (!$('#pop').hidden && !e.target.closest('#pop')) closePop(); }, true);
+  // 메일 본문(별도 틀) 안을 누르거나, 다른 창으로 가거나, 스크롤하면 메뉴 닫힘
+  window.addEventListener('blur', () => { if (!$('#pop').hidden) closePop(); });
+  document.addEventListener('scroll', (e) => { if (!$('#pop').hidden && !e.target.closest?.('#pop')) closePop(); }, true);
   $('#btn-side').onclick = () => document.body.classList.add('drawer');
   $('#btn-side-close').onclick = $('#scrim').onclick = () => document.body.classList.remove('drawer');
   $('#btn-compose').onclick = $('#fab').onclick = () => { document.body.classList.remove('drawer'); openCompose({ mode: 'new' }); };
