@@ -554,18 +554,20 @@ function renderReader() {
     const fa = parseAddrList(m.from)[0] || { name: '', email: '' };
     const mine = isMine(m.from);
     const toLine = [m.to && `받는 사람: ${m.to}`, m.cc && `참조: ${m.cc}`].filter(Boolean).join('  ·  ');
+    const rc = rcptHtml(m, toLine, th.rcpt?.has(m.id));
     const files = m.attachments.filter((x) => !x.inline || !(m.html || '').includes(`cid:${x.contentId}`));
     h += `<article class="msg${open ? '' : ' collapsed'}" data-mid="${esc(m.id)}">
       <div class="m-head" data-toggle>
         <div class="avatar" style="background:${mine ? a.color : colorOf(fa.email)}">${esc(initial(m.from))}</div>
         <div class="m-who">
           <div class="m-from">${esc(fa.name || fa.email)}${fa.name ? `<small>&lt;${esc(fa.email)}&gt;</small>` : ''}</div>
-          <div class="m-to" title="${esc(toLine)}">${esc(toLine)}</div>
+          ${rc.line}
           <div class="m-snip">${files.length ? '📎 ' : ''}${esc(m.snippet)}</div>
         </div>
         <div class="m-date">${longDate(m.date)}</div>
         <div class="m-quick"><button class="mq-txt" data-mact="reply" title="이 메일에 답장">답장</button><button data-mact="${inTrash ? 'untrash1' : 'trash1'}" title="${inTrash ? '이 메일만 복원' : '이 메일만 삭제 (대화의 다른 메일은 그대로)'}">${inTrash ? '♻' : '🗑'}</button><button data-mact="more" title="더 보기">⋯</button></div>
       </div>
+      ${rc.box}
       <div class="m-body">
         ${files.length ? `<div class="atts atts-top">${files.map((x) => attChip(m, x)).join('')}${files.length > 1 ? `<button class="btn-ghost btn-sm att-all" data-attall title="모든 첨부를 고른 폴더에 저장">⬇ 모두 받기 (${files.length})</button>` : ''}</div>` : ''}
         <div class="m-imgnote"></div>
@@ -582,7 +584,28 @@ function renderReader() {
   h += `<div class="r-reply">${split('reply', '답장')}${split('replyAll', '전체 답장')}${split('forward', '전달')}</div>`;
   $('#reader').innerHTML = h;
   applyZoom();
+  fitRcpt();
   $$('#reader .msg:not(.draft-msg)').forEach((el) => { if (!el.classList.contains('collapsed')) fillBody(el); });
+}
+
+/* 받는 사람·참조 한 줄 + 끝에 "… (N명) ▾" → 누르면 전체 목록 펼치기 */
+function rcptHtml(m, toLine, open) {
+  const groups = [['받는 사람', m.to], ['참조', m.cc], ['숨은 참조', m.bcc]]
+    .map(([k, v]) => [k, v ? parseAddrList(v) : []]).filter(([, l]) => l.length);
+  const n = groups.reduce((t, [, l]) => t + l.length, 0);
+  if (!n) return { line: '', box: '' };
+  const full = groups.map(([k, l]) => `<div class="rf-row"><b class="rf-k">${k} <small>${l.length}</small></b><span class="rf-v">${l.map((a) => `<span class="rf-a" title="${esc(a.email)}">${a.name ? `${esc(a.name)} <small>&lt;${esc(a.email)}&gt;</small>` : esc(a.email)}</span>`).join('')}</span></div>`).join('');
+  return { line: `<div class="m-to${open ? ' open' : ''}${n > 1 ? '' : ' one'}"><span class="m-to-txt" title="${esc(toLine)}">${esc(toLine)}</span><span class="m-to-sum">${groups.map(([k, l]) => `${k} ${l.length}명`).join(' · ')}</span><button class="m-to-more" data-rcpt title="${open ? '접기' : '받는 사람·참조 모두 보기'}"><span class="mtm-n">… (${n}명)</span><span class="mtm-ar">▾</span></button></div>
+`, box: `<div class="m-rcpt"${open ? '' : ' hidden'}>${full}</div>` };
+}
+
+/** 한 줄에 다 들어가면 "… (N명) ▾" 숨김 (펼친 상태는 그대로) */
+function fitRcpt() {
+  $$('#reader .m-to:not(.open)').forEach((el) => {
+    el.classList.remove('fits');
+    const t = el.querySelector('.m-to-txt');
+    if (t && t.scrollWidth <= t.clientWidth + 1) el.classList.add('fits');
+  });
 }
 
 function attChip(m, x) {
@@ -2179,6 +2202,7 @@ function extendSel(d) {
 /* ───────── 이벤트 연결 ───────── */
 function bind() {
   document.addEventListener('keydown', onKey);
+  try { let w0 = 0; new ResizeObserver(([e]) => { const w = Math.round(e.contentRect.width); if (w !== w0) { w0 = w; fitRcpt(); } }).observe($('#reader')); } catch { /* 무시 */ }
   applyWidths();
   bindGutter($('#gut-side'), 'wSide', 180, 420, 236);
   bindGutter($('#gut-list'), 'wList', 300, 900, 420);
@@ -2320,10 +2344,21 @@ function bind() {
     if (e.target.closest('[data-attall]') && m) { attSaveAll(m); return; }
     const att = e.target.closest('[data-att]');
     if (att && m) { if (e.detail >= 2) { closePop(); attOpen(m, m.attachments[Number(att.dataset.att)]); } else attMenu(att, m, m.attachments[Number(att.dataset.att)]); return; }
+    if (e.target.closest('[data-rcpt]') && m) {
+      const th = state.thread; th.rcpt = th.rcpt || new Set();
+      const open = !th.rcpt.has(m.id);
+      open ? th.rcpt.add(m.id) : th.rcpt.delete(m.id);
+      const line = msgEl.querySelector('.m-to'), box = msgEl.querySelector('.m-rcpt');
+      line.classList.toggle('open', open); box.hidden = !open;
+      line.querySelector('[data-rcpt]').title = open ? '접기' : '받는 사람·참조 모두 보기';
+      if (!open) fitRcpt();
+      return;
+    }
+    if (e.target.closest('.m-rcpt')) return; // 목록 안 누르기·끌어 선택은 메일 접기와 무관
     if (e.target.closest('[data-toggle]')) {
       const opened = msgEl.classList.toggle('collapsed') === false;
       state.thread.open = state.thread.open || new Set();
-      if (opened) { state.thread.open.add(m.id); fillBody(msgEl); }
+      if (opened) { state.thread.open.add(m.id); fillBody(msgEl); fitRcpt(); }
     }
   });
   pr.addEventListener('contextmenu', (e) => {
