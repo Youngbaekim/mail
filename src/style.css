@@ -600,3 +600,35 @@ body.resizing iframe { pointer-events: none; }
 .suggest li.sug-enable.on, .suggest li.sug-enable:hover { background: var(--accent-soft); }
 .sug-x { margin-left: auto; padding: 0 4px; color: var(--soft); }
 .sug-x:hover { color: var(--danger, #c33); }
+
+/* 원본 보기 */
+.modal-src .modal-card { width: min(860px, 100%); }
+.modal-src h3 small { margin-left: 6px; font-weight: 400; color: var(--soft); font-size: 13px; }
+.modal-src h4 { margin: 16px 0 6px; font-size: 13.5px; }
+.modal-src h4 small { font-weight: 400; color: var(--soft); }
+.src-verdict { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px; font-size: 13px; margin-bottom: 12px; border: 1px solid; }
+.src-verdict b { font-size: 14.5px; }
+.v-ok { background: rgba(30,122,70,.10); border-color: rgba(30,122,70,.35); color: var(--ok); }
+.v-bad { background: rgba(179,38,30,.10); border-color: rgba(179,38,30,.35); color: var(--danger); }
+.v-warn { background: var(--warn-bg); border-color: rgba(178,106,0,.35); color: var(--warn); }
+.src-verdict span { color: var(--ink); }
+.src-tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.src-tbl th, .src-tbl td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.src-tbl thead th { color: var(--soft); font-weight: 600; background: var(--side); }
+.src-tbl tbody th { width: 92px; white-space: nowrap; }
+.src-tbl td { word-break: break-all; }
+.src-tbl .mn { color: var(--soft); word-break: keep-all; }
+.sv { display: inline-block; padding: 0 8px; border-radius: 9px; font-weight: 800; font-size: 11.5px; }
+.sv-ok { background: rgba(30,122,70,.15); color: var(--ok); }
+.sv-bad { background: rgba(179,38,30,.15); color: var(--danger); }
+.sv-warn { background: var(--warn-bg); color: var(--warn); }
+.sv-none { background: var(--side); color: var(--soft); }
+small.al { color: var(--ok); margin-left: 4px; } small.mis { color: var(--warn); margin-left: 4px; }
+.src-recv { margin: 0; padding-left: 22px; font-size: 12px; line-height: 1.7; word-break: break-all; }
+.src-recv small { color: var(--soft); }
+.src-links { display: flex; flex-wrap: wrap; gap: 4px 6px; font-size: 12px; }
+.src-links span { padding: 1px 8px; border-radius: 9px; background: var(--side); }
+.src-links span.al { background: rgba(30,122,70,.12); color: var(--ok); }
+.src-raw { margin-top: 14px; font-size: 12.5px; }
+.src-raw summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+.src-raw pre { max-height: 340px; overflow: auto; margin: 8px 0 0; padding: 10px; border-radius: 8px; background: var(--side); font: 11.5px/1.5 Consolas, 'D2Coding', monospace; white-space: pre-wrap; word-break: break-all; }

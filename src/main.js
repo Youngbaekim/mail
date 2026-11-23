@@ -1907,6 +1907,70 @@ async function openMenu(anchor) {
   const pr = $('#m-pre', p); pr.value = String(state.prefetchN); pr.onchange = () => { state.prefetchN = Number(pr.value); pref.set('prefetchN', state.prefetchN); if (state.prefetchN) { bg.ranOnce = false; runPrefetch(); } };
 }
 
+/* Gmail 웹 주소: /u/<메일>/ 형식은 그 브라우저에 해당 계정이 없으면 404 → authuser 방식 */
+const gmailWebUrl = (m) => `https://mail.google.com/mail/?authuser=${encodeURIComponent(m.account)}#all/${m.threadId}`;
+
+/* ───────── 원본 보기: 발신 인증(SPF·DKIM·DMARC)·주요 헤더·링크·원문 ───────── */
+function parseRawHeaders(bytes) {
+  let end = bytes.length;
+  for (let i = 0; i < bytes.length - 3; i++) if (bytes[i] === 13 && bytes[i + 1] === 10 && bytes[i + 2] === 13 && bytes[i + 3] === 10) { end = i; break; }
+  if (end === bytes.length) for (let i = 0; i < bytes.length - 1; i++) if (bytes[i] === 10 && bytes[i + 1] === 10) { end = i; break; }
+  const head = new TextDecoder('latin1').decode(bytes.subarray(0, end)).replace(/\r?\n[ \t]+/g, ' ');
+  const list = [];
+  head.split(/\r?\n/).forEach((ln) => { const k = ln.indexOf(':'); if (k > 0) list.push([ln.slice(0, k).trim(), ln.slice(k + 1).trim()]); });
+  return list;
+}
+const authOf = (txt, key) => {
+  const r = new RegExp(`\\b${key}=([a-z]+)([^;]*)`, 'i').exec(txt || '');
+  if (!r) return null;
+  const d = /header\.(?:d|i|from)=@?([^\s;]+)/i.exec(r[2]) || /smtp\.mailfrom=(?:[^@\s;]*@)?([^\s;]+)/i.exec(r[2]);
+  return { v: r[1].toLowerCase(), d: d ? d[1].replace(/^@/, '') : '' };
+};
+const domOf = (addr) => ((/@([^>\s]+)/.exec(addr || '') || [])[1] || '').toLowerCase();
+const sameOrg = (a, b) => { if (!a || !b) return false; const t = (x) => x.split('.').slice(-2).join('.'); return a === b || a.endsWith('.' + b) || b.endsWith('.' + a) || t(a) === t(b); };
+
+async function showOriginal(m) {
+  const w = modal(`<h3>🔎 원본 보기</h3><p class="modal-tip">원본을 불러오는 중…</p>`);
+  w.classList.add('modal-src');
+  w.addEventListener('click', (e) => { if (e.target === w || e.target.closest('[data-close]')) w.remove(); });
+  let bytes;
+  try { bytes = b64ToBytes(await gm.getRawEml(m.account, m.id)); } catch (e) { w.remove(); fail(e, 'eml'); return; }
+  const H = parseRawHeaders(bytes);
+  const get = (k) => H.filter(([n]) => n.toLowerCase() === k.toLowerCase()).map(([, v]) => v);
+  const ar = get('Authentication-Results')[0] || get('ARC-Authentication-Results')[0] || '';
+  const fromDom = domOf(get('From')[0] || m.from);
+  const rows = [['SPF', authOf(ar, 'spf'), '보낸 서버가 그 도메인이 허용한 서버인지'], ['DKIM', authOf(ar, 'dkim'), '메일에 도메인의 전자 서명이 있고 변조되지 않았는지'], ['DMARC', authOf(ar, 'dmarc'), '보낸 사람 주소(From)의 도메인과 인증 도메인이 일치하는지']];
+  const ok = (r) => r && r.v === 'pass';
+  const bad = rows.some(([, r]) => r && /fail|softfail|permerror/.test(r.v));
+  const allOk = rows.every(([, r]) => ok(r));
+  const aligned = rows.some(([, r]) => ok(r) && sameOrg(r.d, fromDom));
+  const verdict = !ar ? ['warn', '인증 결과 기록이 없습니다', '받는 서버(Gmail)의 판정 줄이 없어 판단할 수 없습니다. 아래 헤더를 직접 확인하세요.']
+    : bad ? ['bad', '위조 의심', '인증에 실패한 항목이 있습니다. 링크를 누르지 말고 스팸 신고·차단을 권합니다.']
+    : allOk && aligned ? ['ok', '발신 도메인 인증 통과', `보낸 사람 도메인(${esc(fromDom)})이 실제로 보낸 메일일 가능성이 높습니다. 다만 내용이 맞는지는 해당 서비스 앱에서 따로 확인하세요.`]
+    : ['warn', '일부만 확인됨', '모두 통과하지는 않았습니다. 보낸 사람 도메인과 인증 도메인을 비교해 보세요.'];
+  const badge = (r) => !r ? '<span class="sv sv-none">기록 없음</span>' : `<span class="sv ${r.v === 'pass' ? 'sv-ok' : /fail/.test(r.v) ? 'sv-bad' : 'sv-warn'}">${esc(r.v.toUpperCase())}</span>`;
+  const recv = get('Received').map((v) => { const f = /from\s+(\S+)(?:\s+\(([^)]*)\))?/i.exec(v); const b = /by\s+(\S+)/i.exec(v); return `${f ? esc(f[1]) + (f[2] ? ` <small>(${esc(f[2].slice(0, 60))})</small>` : '') : '?'} → ${b ? esc(b[1]) : '?'}`; }).reverse();
+  const links = {}; (m.html || '').replace(/href\s*=\s*["']?(https?:\/\/[^"'\s>]+)/gi, (_, u) => { try { const h = new URL(u).hostname.toLowerCase(); links[h] = (links[h] || 0) + 1; } catch { /* 무시 */ } });
+  const lk = Object.entries(links).sort((a, b) => b[1] - a[1]);
+  const kv = [['From', get('From')[0]], ['Return-Path', get('Return-Path')[0]], ['Reply-To', get('Reply-To')[0]], ['Sender', get('Sender')[0]], ['Message-ID', get('Message-ID')[0] || get('Message-Id')[0]]].filter(([, v]) => v);
+  let raw = new TextDecoder('utf-8').decode(bytes.length > 400000 ? bytes.subarray(0, 400000) : bytes);
+  if (bytes.length > 400000) raw += '\n\n… (앞부분 400KB만 표시 — 전체는 [.eml 저장])';
+  w.querySelector('.modal-card').innerHTML = `<h3>🔎 원본 보기 <small>${esc(m.subject || '')}</small></h3>
+    <div class="src-verdict v-${verdict[0]}"><b>${verdict[1]}</b><span>${verdict[2]}</span></div>
+    <table class="src-tbl"><thead><tr><th>검사</th><th>결과</th><th>인증 도메인</th><th>의미</th></tr></thead><tbody>
+      ${rows.map(([k, r, d]) => `<tr><th>${k}</th><td>${badge(r)}</td><td>${r?.d ? esc(r.d) + (sameOrg(r.d, fromDom) ? ' <small class="al">From과 일치</small>' : ' <small class="mis">From과 다름</small>') : '—'}</td><td class="mn">${d}</td></tr>`).join('')}
+    </tbody></table>
+    <h4>주요 헤더</h4>
+    <table class="src-tbl kv"><tbody>${kv.map(([k, v]) => `<tr><th>${k}</th><td>${esc(v)}</td></tr>`).join('')}</tbody></table>
+    ${recv.length ? `<h4>전달 경로 <small>(처음 → Gmail)</small></h4><ol class="src-recv">${recv.map((x) => `<li>${x}</li>`).join('')}</ol>` : ''}
+    ${lk.length ? `<h4>본문 링크 도메인 <small>(누르지 말고 이름만 확인)</small></h4><div class="src-links">${lk.map(([h, n]) => `<span class="${sameOrg(h, fromDom) ? 'al' : ''}">${esc(h)}${n > 1 ? ` ×${n}` : ''}</span>`).join('')}</div>` : ''}
+    <details class="src-raw"><summary>원문 전체 (헤더·본문 소스)</summary><pre>${esc(raw)}</pre></details>
+    <div class="modal-foot"><button class="btn-ghost" data-copy>원문 복사</button><button class="btn-ghost" data-eml>.eml 저장</button><button class="btn-ghost" data-gweb>Gmail 웹에서 열기</button><button class="btn-primary" data-close>닫기</button></div>`;
+  w.querySelector('[data-copy]').onclick = () => navigator.clipboard.writeText(raw).then(() => toast('원문을 복사했습니다.'), () => toast('복사하지 못했습니다.'));
+  w.querySelector('[data-eml]').onclick = () => saveToDownloads(new Blob([bytes], { type: 'message/rfc822' }), `${(m.subject || 'mail').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)}.eml`);
+  w.querySelector('[data-gweb]').onclick = () => window.open(gmailWebUrl(m), '_blank');
+}
+
 function modal(html) {
   const wrap = document.createElement('div');
   wrap.className = 'modal';
@@ -2013,7 +2077,7 @@ function listMenu(pt) {
     else if (k === 'newTo' && sender) openCompose({ mode: 'new', account: one.account, to: sender.name ? `${sender.name} <${sender.email}>` : sender.email });
     else if (k === 'copyAddr' && sender) { await navigator.clipboard.writeText(sender.email).catch(() => {}); toast(`복사했습니다: ${sender.email}`); }
     else if (k === 'eml') saveEml(one);
-    else if (k === 'web') window.open(`https://mail.google.com/mail/u/${encodeURIComponent(one.account)}/#all/${one.id}`, '_blank');
+    else if (k === 'web') window.open(gmailWebUrl({ account: one.account, threadId: one.id }), '_blank');
     else if (k === 'clear') { state.checked.clear(); renderList(); renderReader(); }
     else if (k === 'block') blockSenders(items);
     else actOn(k, items);
@@ -2331,8 +2395,9 @@ function bind() {
     if (ma && m) {
       if (ma.dataset.mact === 'trash1' || ma.dataset.mact === 'untrash1') { trashOne(m, ma.dataset.mact === 'untrash1'); return; }
       if (ma.dataset.mact === 'reply') openCompose({ mode: 'reply', msg: m });
-      else showPop(ma, mi('reply', '답장', { icon: '↩' }) + mi('replyAll', '전체 답장', { icon: '⤶' }) + mi('forward', '전달', { icon: '↪' }) + '<hr>' + mi('eml', '원본(.eml) 저장', { icon: '🧾' }) + mi('orig', 'Gmail 웹에서 열기', { icon: '🌐' }), async (x) => {
-        if (x === 'orig') window.open(`https://mail.google.com/mail/u/${encodeURIComponent(m.account)}/#all/${m.threadId}`, '_blank');
+      else showPop(ma, mi('reply', '답장', { icon: '↩' }) + mi('replyAll', '전체 답장', { icon: '⤶' }) + mi('forward', '전달', { icon: '↪' }) + '<hr>' + mi('src', '원본 보기 (발신 인증·헤더)', { icon: '🔎' }) + mi('eml', '원본(.eml) 저장', { icon: '🧾' }) + mi('orig', 'Gmail 웹에서 열기', { icon: '🌐' }), async (x) => {
+        if (x === 'orig') window.open(gmailWebUrl(m), '_blank');
+        else if (x === 'src') showOriginal(m);
         else if (x === 'eml') { try { const d = await gm.getRawEml(m.account, m.id); saveToDownloads(new Blob([b64ToBytes(d)], { type: 'message/rfc822' }), `${(m.subject || 'mail').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)}.eml`); } catch (er) { fail(er, 'eml'); } }
         else openCompose({ mode: x, msg: m });
       });
